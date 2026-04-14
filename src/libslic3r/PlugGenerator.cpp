@@ -1,6 +1,7 @@
 #include "PlugGenerator.hpp"
 #include "ExPolygon.hpp"
 #include "Tesselate.hpp"
+#include "libslic3r.h" // for SCALING_FACTOR
 
 #include <cassert>
 #include <cmath>
@@ -58,8 +59,8 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     poly_2d.points.reserve(n);
     for (int i = 0; i < n; ++i) {
         Vec2d p = project_to_2d(loop[i], origin, u, v);
-        // Slic3r's Polygon uses scaled integer coordinates (nanometers).
-        poly_2d.points.emplace_back(Point(coord_t(p.x() * 1e6), coord_t(p.y() * 1e6)));
+        // Slic3r's Polygon uses scaled integer coordinates.
+        poly_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
     }
 
     // Ensure CCW orientation (for correct triangulation normals).

@@ -1428,78 +1428,89 @@ void GLGizmoMmuSegmentation::perform_hole_fill(const Vec2d &mouse_position)
     if (object_idx < 0)
         return;
 
-    // Perform a raycast to find which face the user clicked on.
-    const Camera &camera = wxGetApp().plater()->get_camera();
-
-    // Iterate over model-part volumes to find the hit.
-    for (int vol_idx = 0; vol_idx < (int)mo->volumes.size(); ++vol_idx) {
-        const ModelVolume *mv = mo->volumes[vol_idx];
-        if (!mv->is_model_part())
-            continue;
-
-        const TriangleMesh &mesh = mv->mesh();
-        const indexed_triangle_set &its = mesh.its;
-        if (its.indices.empty())
-            continue;
-
-        // Use the existing raycast infrastructure from the base painter gizmo.
-        // m_rr holds the last raycast result (mesh_id, hit point, facet index).
-        // We rely on the fact that on_mouse() already updated m_rr before calling us.
-        if (m_rr.mesh_id != vol_idx)
-            continue;
-
-        int facet_idx = (int)m_rr.facet;
-        Vec3f hit_point = m_rr.hit;
-
-        // Find the nearest hole boundary on the face the user clicked.
-        HoleBoundary boundary;
-        bool found = find_nearest_hole(its, facet_idx, hit_point, boundary, m_hole_fill_angle_tolerance);
-        if (!found) {
-            // No hole detected — notify the user.
-            wxGetApp().plater()->get_notification_manager()->push_notification(
-                NotificationType::CustomNotification,
-                NotificationManager::NotificationLevel::RegularNotificationLevel,
-                _u8L("No hole detected at the clicked location. Try clicking closer to a hole boundary."));
-            return;
-        }
-
-        // Generate the plug mesh.
-        TriangleMesh plug = generate_plug(boundary, m_hole_fill_depth);
-        if (plug.empty()) {
-            wxGetApp().plater()->get_notification_manager()->push_notification(
-                NotificationType::CustomNotification,
-                NotificationManager::NotificationLevel::WarningNotificationLevel,
-                _u8L("Failed to generate hole fill plug. The hole geometry may be too complex."));
-            return;
-        }
-
-        // Take an undo/redo snapshot before modifying the model.
-        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Hole fill color");
-
-        // Add the plug as a new volume to the model object.
-        // We need a non-const pointer to the ModelObject.
-        ModelObject *mo_mut = wxGetApp().model().objects[object_idx];
-        ModelVolume *new_vol = mo_mut->add_volume(std::move(plug), ModelVolumeType::MODEL_PART, false);
-        new_vol->set_new_unique_id();
-        new_vol->name = "HoleFill_" + std::to_string(vol_idx) + "_f" + std::to_string(facet_idx);
-
-        // Assign the selected extruder (1-indexed).
-        new_vol->config.set("extruder", (int)m_selected_extruder_idx + 1);
-
-        // Apply the same instance transform offset as the source volume.
-        new_vol->set_transformation(mv->get_transformation());
-
-        // Notify the system that the model changed.
-        wxGetApp().plater()->update();
-        wxGetApp().obj_list()->update_after_undo_redo();
-
+    // m_rr is kept up-to-date by the base class on Moving events (since we set
+    // m_tool_type=BRUSH, m_cursor_type=POINTER). By the time the user clicks,
+    // the raycast result is already populated for the current mouse position.
+    if (m_rr.mesh_id < 0) {
         wxGetApp().plater()->get_notification_manager()->push_notification(
             NotificationType::CustomNotification,
             NotificationManager::NotificationLevel::RegularNotificationLevel,
-            _u8L("Hole filled successfully! A new volume has been added with the selected filament."));
-
-        return; // Only fill the first detected hole per click.
+            _u8L("No surface detected under cursor."));
+        return;
     }
+
+    // m_rr.mesh_id is the index into model-part volumes (same order as
+    // the trafo_matrices array built by the base class).
+    // Map it back to find the actual ModelVolume.
+    int model_part_idx = 0;
+    const ModelVolume *hit_volume = nullptr;
+    int hit_volume_raw_idx = -1;
+    for (int vi = 0; vi < (int)mo->volumes.size(); ++vi) {
+        if (!mo->volumes[vi]->is_model_part())
+            continue;
+        if (model_part_idx == m_rr.mesh_id) {
+            hit_volume = mo->volumes[vi];
+            hit_volume_raw_idx = vi;
+            break;
+        }
+        ++model_part_idx;
+    }
+
+    if (!hit_volume)
+        return;
+
+    const indexed_triangle_set &its = hit_volume->mesh().its;
+    if (its.indices.empty())
+        return;
+
+    int facet_idx = (int)m_rr.facet;
+    Vec3f hit_point = m_rr.hit;
+
+    // Find the nearest hole boundary on the face the user clicked.
+    HoleBoundary boundary;
+    bool found = find_nearest_hole(its, facet_idx, hit_point, boundary, m_hole_fill_angle_tolerance);
+    if (!found) {
+        wxGetApp().plater()->get_notification_manager()->push_notification(
+            NotificationType::CustomNotification,
+            NotificationManager::NotificationLevel::RegularNotificationLevel,
+            _u8L("No hole detected at the clicked location. Try clicking closer to a hole boundary."));
+        return;
+    }
+
+    // Generate the plug mesh.
+    TriangleMesh plug = generate_plug(boundary, m_hole_fill_depth);
+    if (plug.empty()) {
+        wxGetApp().plater()->get_notification_manager()->push_notification(
+            NotificationType::CustomNotification,
+            NotificationManager::NotificationLevel::WarningNotificationLevel,
+            _u8L("Failed to generate hole fill plug. The hole geometry may be too complex."));
+        return;
+    }
+
+    // Take an undo/redo snapshot before modifying the model.
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Hole fill color");
+
+    // Add the plug as a new volume to the model object.
+    ModelObject *mo_mut = wxGetApp().model().objects[object_idx];
+    ModelVolume *new_vol = mo_mut->add_volume(std::move(plug), ModelVolumeType::MODEL_PART, false);
+    new_vol->set_new_unique_id();
+    new_vol->name = "HoleFill_" + std::to_string(hit_volume_raw_idx) + "_f" + std::to_string(facet_idx);
+
+    // Assign the selected extruder (1-indexed).
+    new_vol->config.set("extruder", (int)m_selected_extruder_idx + 1);
+
+    // Apply the same volume-level transform as the source volume so the plug
+    // sits correctly in the object's coordinate space.
+    new_vol->set_transformation(hit_volume->get_transformation());
+
+    // Notify the system that the model changed.
+    wxGetApp().plater()->update();
+    wxGetApp().obj_list()->update_after_undo_redo();
+
+    wxGetApp().plater()->get_notification_manager()->push_notification(
+        NotificationType::CustomNotification,
+        NotificationManager::NotificationLevel::RegularNotificationLevel,
+        _u8L("Hole filled successfully! A new volume has been added with the selected filament."));
 }
 
 } // namespace Slic3r
