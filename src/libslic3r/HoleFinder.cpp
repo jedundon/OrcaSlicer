@@ -20,7 +20,9 @@ static Vec3f face_normal(const indexed_triangle_set &its, int face_idx)
     const Vec3f &v2 = its.vertices[f[2]];
     Vec3f n = (v1 - v0).cross(v2 - v0);
     float len = n.norm();
-    return (len > 0.f) ? (n / len) : Vec3f::Zero();
+    if (len > 0.f)
+        return Vec3f(n / len);
+    return Vec3f::Zero();
 }
 
 // Canonical edge key: ordered pair (min, max) of vertex indices.
