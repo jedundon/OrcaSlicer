@@ -130,6 +130,8 @@ set(lisbslic3r_sources
     ExtrusionSimulator.hpp
     FaceDetector.cpp
     FaceDetector.hpp
+    HoleFinder.cpp
+    HoleFinder.hpp
     Feature/FuzzySkin/FuzzySkin.cpp
     Feature/FuzzySkin/FuzzySkin.hpp
     Feature/Interlocking/InterlockingGenerator.cpp
@@ -331,6 +333,8 @@ set(lisbslic3r_sources
     PlaceholderParser.hpp
     Platform.cpp
     Platform.hpp
+    PlugGenerator.cpp
+    PlugGenerator.hpp
     PNGReadWrite.cpp
     PNGReadWrite.hpp
     Point.cpp

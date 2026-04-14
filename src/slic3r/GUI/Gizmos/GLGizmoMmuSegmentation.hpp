@@ -119,7 +119,14 @@ protected:
     // ORCA: Cache used filaments to filter UI
     std::set<size_t>                  m_used_filaments;      // Set of used filament indices (cached)
 
+    // Hole Fill feature
+    float                             m_hole_fill_depth = 1.0f; // Plug depth in mm
+    float                             m_hole_fill_angle_tolerance = 5.0f; // Coplanarity tolerance in degrees
+
     static const constexpr float      CursorRadiusMin = 0.1f; // cannot be zero
+    static const constexpr float      HoleFillDepthMin = 0.2f;
+    static const constexpr float      HoleFillDepthMax = 5.0f;
+    static const constexpr float      HoleFillDepthStep = 0.1f;
 
 private:
     bool on_init() override;
@@ -145,6 +152,10 @@ private:
     void render_filament_remap_ui(float window_width, float max_tooltip_width);
     // ORCA: Helper to update the cache of used filaments
     void update_used_filaments();
+
+    // Hole Fill methods
+    void perform_hole_fill(const Vec2d &mouse_position);
+    bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down) override;
 
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.

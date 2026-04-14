@@ -12,12 +12,18 @@
 #include "slic3r/GUI/GUI.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/HoleFinder.hpp"
+#include "libslic3r/PlugGenerator.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
 
 #include <glad/gl.h>
 
 namespace Slic3r::GUI {
+
+// Temporary unique ID for the Hole Fill tool button.
+// TODO: Replace with a proper ImGui icon glyph once a dedicated icon is designed.
+static const wchar_t HoleFillToolIcon = 0xF0FF; // Private Use Area codepoint, won't conflict with existing icons
 
 static inline void show_notification_extruders_limit_exceeded()
 {
@@ -111,6 +117,11 @@ bool GLGizmoMmuSegmentation::on_init()
     m_desc["gap_area_caption"]     = ctrl + _L("Mouse wheel");
     m_desc["gap_area"]             = _L("Gap area");
     m_desc["perform"]              = _L("Perform");
+
+    // Hole Fill tool descriptions
+    m_desc["hole_fill_depth"]       = _L("Fill depth");
+    m_desc["hole_fill_depth_caption"] = ctrl + _L("Mouse wheel");
+    m_desc["tool_hole_fill"]        = _L("Hole fill");
 
     m_desc["remove_all"]           = _L("Erase all painting");
     m_desc["circle"]               = _L("Circle");
@@ -219,6 +230,9 @@ bool GLGizmoMmuSegmentation::on_key_down_select_tool_type(int keyCode) {
         break;
     case 'G':
         m_current_tool = ImGui::GapFillIcon;
+        break;
+    case 'J': // J for "fill in" hole — H is taken by HeightRange
+        m_current_tool = HoleFillToolIcon;
         break;
     default:
         return false;
@@ -453,14 +467,15 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     m_imgui->text(m_desc.at("tool_type"));
 
-    std::array<wchar_t, 6> tool_ids;
-    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon };
-    std::array<wchar_t, 6> icons;
+    std::array<wchar_t, 7> tool_ids;
+    // Note: HoleFillToolIcon uses a temporary PUA codepoint — TODO: create dedicated icon
+    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon, HoleFillToolIcon };
+    std::array<wchar_t, 7> icons;
     if (m_is_dark_mode)
-        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::GapFillDarkIcon };
+        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::GapFillDarkIcon, HoleFillToolIcon };
     else
-        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon };
-    std::array<wxString, 6> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill"), _L("Gap Fill") };
+        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon, HoleFillToolIcon };
+    std::array<wxString, 7> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill"), _L("Gap Fill"), _L("Hole Fill") };
     for (int i = 0; i < tool_ids.size(); i++) {
         std::string  str_label = std::string("");
         std::wstring btn_name  = icons[i] + boost::nowide::widen(str_label);
@@ -664,6 +679,24 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         ImGui::SameLine(drag_left_width + gap_area_slider_left);
         ImGui::PushItemWidth(1.5 * slider_icon_width);
         ImGui::BBLDragFloat("##gap_area_input", &TriangleSelectorPatch::gap_area, 0.05f, 0.0f, 0.0f, "%.2f");
+    }
+    else if (m_current_tool == HoleFillToolIcon) {
+        // Hole Fill tool: click on a hole to fill it with the selected extruder color.
+        m_tool_type   = ToolType::BRUSH; // Reuse BRUSH for raycasting; actual action is in perform_hole_fill()
+        m_cursor_type = TriangleSelector::CursorType::POINTER;
+
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(m_desc["hole_fill_depth"] + ":");
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        std::string hf_format = std::string("%.1f") + I18N::translate_utf8("mm", "Hole fill depth");
+        m_imgui->bbl_slider_float_style("##hole_fill_depth", &m_hole_fill_depth, HoleFillDepthMin, HoleFillDepthMax, hf_format.data(), 1.0f, true);
+        ImGui::SameLine(drag_left_width + sliders_left_width);
+        ImGui::PushItemWidth(1.5 * slider_icon_width);
+        ImGui::BBLDragFloat("##hole_fill_depth_input", &m_hole_fill_depth, 0.05f, 0.0f, 0.0f, "%.1f");
+
+        ImGui::Separator();
+        m_imgui->text(_L("Click on a hole in the model to fill it with the selected filament color."));
     }
 
     ImGui::Separator();
@@ -1352,6 +1385,120 @@ void GLGizmoMmuSegmentation::remap_filament_assignments()
         
         // ORCA: Refresh used filaments cache
         this->update_used_filaments();
+    }
+}
+
+// ─── Hole Fill Implementation ────────────────────────────────────────────────
+
+bool GLGizmoMmuSegmentation::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down)
+{
+    // Intercept left-click when in Hole Fill mode.
+    if (m_current_tool == HoleFillToolIcon && action == SLAGizmoEventType::LeftDown && !shift_down) {
+        perform_hole_fill(mouse_position);
+        return true;
+    }
+
+    // For mouse wheel in Hole Fill mode, adjust depth.
+    if (m_current_tool == HoleFillToolIcon &&
+        (action == SLAGizmoEventType::MouseWheelUp || action == SLAGizmoEventType::MouseWheelDown) &&
+        control_down) {
+        m_hole_fill_depth = action == SLAGizmoEventType::MouseWheelDown ?
+            std::max(m_hole_fill_depth - HoleFillDepthStep, HoleFillDepthMin) :
+            std::min(m_hole_fill_depth + HoleFillDepthStep, HoleFillDepthMax);
+        m_parent.set_as_dirty();
+        return true;
+    }
+
+    // All other tools/events: delegate to base class.
+    return GLGizmoPainterBase::gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
+}
+
+void GLGizmoMmuSegmentation::perform_hole_fill(const Vec2d &mouse_position)
+{
+    // Get the current selection and model object.
+    const Selection &selection = m_parent.get_selection();
+    if (selection.is_empty())
+        return;
+
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    if (!mo)
+        return;
+
+    int object_idx = selection.get_object_idx();
+    if (object_idx < 0)
+        return;
+
+    // Perform a raycast to find which face the user clicked on.
+    const Camera &camera = wxGetApp().plater()->get_camera();
+
+    // Iterate over model-part volumes to find the hit.
+    for (int vol_idx = 0; vol_idx < (int)mo->volumes.size(); ++vol_idx) {
+        const ModelVolume *mv = mo->volumes[vol_idx];
+        if (!mv->is_model_part())
+            continue;
+
+        const TriangleMesh &mesh = mv->mesh();
+        const indexed_triangle_set &its = mesh.its;
+        if (its.indices.empty())
+            continue;
+
+        // Use the existing raycast infrastructure from the base painter gizmo.
+        // m_rr holds the last raycast result (mesh_id, hit point, facet index).
+        // We rely on the fact that on_mouse() already updated m_rr before calling us.
+        if (m_rr.mesh_id != vol_idx)
+            continue;
+
+        int facet_idx = (int)m_rr.facet;
+        Vec3f hit_point = m_rr.hit;
+
+        // Find the nearest hole boundary on the face the user clicked.
+        HoleBoundary boundary;
+        bool found = find_nearest_hole(its, facet_idx, hit_point, boundary, m_hole_fill_angle_tolerance);
+        if (!found) {
+            // No hole detected — notify the user.
+            wxGetApp().plater()->get_notification_manager()->push_notification(
+                NotificationType::CustomNotification,
+                NotificationManager::NotificationLevel::RegularNotificationLevel,
+                _u8L("No hole detected at the clicked location. Try clicking closer to a hole boundary."));
+            return;
+        }
+
+        // Generate the plug mesh.
+        TriangleMesh plug = generate_plug(boundary, m_hole_fill_depth);
+        if (plug.empty()) {
+            wxGetApp().plater()->get_notification_manager()->push_notification(
+                NotificationType::CustomNotification,
+                NotificationManager::NotificationLevel::WarningNotificationLevel,
+                _u8L("Failed to generate hole fill plug. The hole geometry may be too complex."));
+            return;
+        }
+
+        // Take an undo/redo snapshot before modifying the model.
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Hole fill color");
+
+        // Add the plug as a new volume to the model object.
+        // We need a non-const pointer to the ModelObject.
+        ModelObject *mo_mut = wxGetApp().model().objects[object_idx];
+        ModelVolume *new_vol = mo_mut->add_volume(std::move(plug), ModelVolumeType::MODEL_PART, false);
+        new_vol->set_new_unique_id();
+        new_vol->name = "HoleFill_" + std::to_string(vol_idx) + "_f" + std::to_string(facet_idx);
+
+        // Assign the selected extruder (1-indexed).
+        new_vol->config.set("extruder", (int)m_selected_extruder_idx + 1);
+
+        // Apply the same instance transform offset as the source volume.
+        new_vol->set_transformation(mv->get_transformation());
+
+        // Notify the system that the model changed.
+        wxGetApp().plater()->update();
+        wxGetApp().obj_list()->update_after_undo_redo();
+
+        wxGetApp().plater()->get_notification_manager()->push_notification(
+            NotificationType::CustomNotification,
+            NotificationManager::NotificationLevel::RegularNotificationLevel,
+            _u8L("Hole filled successfully! A new volume has been added with the selected filament."));
+
+        return; // Only fill the first detected hole per click.
     }
 }
 
