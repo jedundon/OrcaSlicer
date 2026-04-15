@@ -67,9 +67,24 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     if (poly_2d.is_clockwise())
         poly_2d.reverse();
 
-    // Wrap in ExPolygon (no holes within the hole boundary itself).
+    // Wrap in ExPolygon with inner loops (islands) as holes.
     ExPolygon expoly;
     expoly.contour = std::move(poly_2d);
+
+    // Add inner loops (e.g., the counter inside letter "A") as holes in the ExPolygon.
+    // These regions will NOT be filled — they stay as part of the original surface.
+    for (const auto &inner : boundary.inner_loops) {
+        Polygon hole_2d;
+        hole_2d.points.reserve(inner.size());
+        for (const Vec3f &pt : inner) {
+            Vec2d p = project_to_2d(pt, origin, u, v);
+            hole_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
+        }
+        // Holes in ExPolygon must be CW (opposite of contour).
+        if (hole_2d.is_counter_clockwise())
+            hole_2d.reverse();
+        expoly.holes.push_back(std::move(hole_2d));
+    }
 
     // ── Step 2: Triangulate the cap face ────────────────────────────────
     // Use the existing Slic3r tessellation which handles concave polygons.
@@ -103,7 +118,7 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     for (int i = 0; i < n; ++i)
         vertices.push_back(loop[i] + offset);
 
-    // ── 3c: Side walls ──
+    // ── 3c: Side walls for outer boundary ──
     // Connect front ring to back ring with two triangles per edge.
     for (int i = 0; i < n; ++i) {
         int i_next = (i + 1) % n;
@@ -116,6 +131,34 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
         // Winding: outward-facing sides.
         faces.push_back(Vec3i32(f0, b0, f1));
         faces.push_back(Vec3i32(f1, b0, b1));
+    }
+
+    // ── 3c-2: Side walls for inner loops (island holes) ──
+    // Each inner loop needs its own side wall ring, with reversed winding
+    // (the "outside" of an inner hole faces inward toward the hole center).
+    for (const auto &inner : boundary.inner_loops) {
+        int in_n = (int)inner.size();
+        if (in_n < 3) continue;
+
+        int inner_front_base = (int)vertices.size();
+        for (int i = 0; i < in_n; ++i)
+            vertices.push_back(inner[i]);
+
+        int inner_back_base = (int)vertices.size();
+        for (int i = 0; i < in_n; ++i)
+            vertices.push_back(inner[i] + offset);
+
+        for (int i = 0; i < in_n; ++i) {
+            int i_next = (i + 1) % in_n;
+            int f0 = inner_front_base + i;
+            int f1 = inner_front_base + i_next;
+            int b0 = inner_back_base + i;
+            int b1 = inner_back_base + i_next;
+
+            // Reversed winding compared to outer walls (faces inward).
+            faces.push_back(Vec3i32(f0, f1, b0));
+            faces.push_back(Vec3i32(f1, b1, b0));
+        }
     }
 
     // ── 3d: Front cap triangles ──

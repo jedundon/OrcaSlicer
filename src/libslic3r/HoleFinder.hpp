@@ -8,12 +8,18 @@
 namespace Slic3r {
 
 // Represents a detected hole boundary on a planar face of a mesh.
+// A hole may contain inner islands (e.g., the counter inside the letter "A").
+// These are represented as `inner_loops` — regions within the hole that should
+// NOT be filled (they are part of the original surface, not the recess).
 struct HoleBoundary {
-    // Ordered 3D vertices forming the closed boundary loop of the hole.
+    // Ordered 3D vertices forming the closed outer boundary loop of the hole.
     std::vector<Vec3f> loop;
+    // Inner loops (islands) that should be excluded from the fill.
+    // For example, the triangular counter inside the letter "A".
+    std::vector<std::vector<Vec3f>> inner_loops;
     // The plane normal of the surrounding face (pointing outward).
     Vec3f              plane_normal;
-    // A point on the plane (centroid of the boundary loop).
+    // A point on the plane (centroid of the outer boundary loop).
     Vec3f              plane_origin;
 };
 
@@ -26,7 +32,8 @@ struct HoleBoundary {
 //      or whose neighbor is not in the coplanar set.
 //   3. Chain boundary edges into closed loops.
 //   4. Classify loops: the outermost loop is the face perimeter; inner loops are holes.
-//   5. Return the inner loops (holes) as HoleBoundary structs.
+//   5. For each hole, check if any other loops are contained within it (islands).
+//      Attach those as inner_loops on the HoleBoundary.
 //
 // Parameters:
 //   its                 - The indexed triangle set of the mesh.

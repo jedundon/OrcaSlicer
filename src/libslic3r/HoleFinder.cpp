@@ -198,22 +198,92 @@ std::vector<HoleBoundary> find_hole_boundaries(
         }
     }
 
-    // Step 6: Build HoleBoundary for each non-perimeter loop.
+    // Step 6: Classify non-perimeter loops into holes and islands.
+    // A "hole" is a loop whose interior is a recess (to be filled).
+    // An "island" is a loop inside a hole whose interior is NOT a recess
+    // (e.g., the triangular counter inside the letter "A").
+    //
+    // Strategy: use signed area orientation + point-in-polygon containment.
+    // - Loops with one orientation (e.g., CW in the projected 2D plane) are holes.
+    // - Loops with the opposite orientation (CCW) that are geometrically contained
+    //   inside a hole loop are islands belonging to that hole.
+    // - The perimeter loop is the largest and is excluded.
+    //
+    // We use a simple 2D point-in-polygon (ray casting) test for containment.
+
+    // Helper: 2D point-in-polygon using ray casting (projected coordinates).
+    auto point_in_loop_2d = [&](float px, float py, const std::vector<int> &verts) -> bool {
+        bool inside = false;
+        int nv = (int)verts.size();
+        for (int i = 0, j = nv - 1; i < nv; j = i++) {
+            float yi = its.vertices[verts[i]][axis1];
+            float yj = its.vertices[verts[j]][axis1];
+            float xi = its.vertices[verts[i]][axis0];
+            float xj = its.vertices[verts[j]][axis0];
+            if (((yi > py) != (yj > py)) &&
+                (px < (xj - xi) * (py - yi) / (yj - yi) + xi))
+                inside = !inside;
+        }
+        return inside;
+    };
+
+    // Helper: compute centroid of a loop in projected 2D.
+    auto loop_centroid_2d = [&](const std::vector<int> &verts) -> std::pair<float, float> {
+        float cx = 0.f, cy = 0.f;
+        for (int vi : verts) {
+            cx += its.vertices[vi][axis0];
+            cy += its.vertices[vi][axis1];
+        }
+        int nv = (int)verts.size();
+        return {cx / nv, cy / nv};
+    };
+
+    // Determine the signed area of the perimeter to establish orientation convention.
+    float perimeter_area = signed_area_2d(loops[perimeter_idx]);
+    // Holes have the opposite sign from the perimeter; islands have the same sign.
+    // (The perimeter encloses the face region; holes are "cut out" of it.)
+
+    // Collect non-perimeter loop indices, separated by role.
+    std::vector<int> hole_indices;   // loops that are holes (recesses)
+    std::vector<int> island_indices; // loops that are islands (raised areas inside holes)
+
     for (int i = 0; i < (int)loops.size(); ++i) {
         if (i == perimeter_idx)
             continue;
+        float area = signed_area_2d(loops[i]);
+        // Hole loops have opposite sign from perimeter; island loops have same sign.
+        if ((area > 0.f) != (perimeter_area > 0.f))
+            hole_indices.push_back(i);
+        else
+            island_indices.push_back(i);
+    }
 
+    // Build HoleBoundary for each hole, then check which islands belong to it.
+    for (int hi : hole_indices) {
         HoleBoundary hb;
         hb.plane_normal = seed_normal;
-        hb.loop.reserve(loops[i].size());
+        hb.loop.reserve(loops[hi].size());
 
         Vec3f centroid = Vec3f::Zero();
-        for (int vi : loops[i]) {
+        for (int vi : loops[hi]) {
             hb.loop.push_back(its.vertices[vi]);
             centroid += its.vertices[vi];
         }
         centroid /= (float)hb.loop.size();
         hb.plane_origin = centroid;
+
+        // Find islands contained within this hole.
+        for (int ii : island_indices) {
+            auto [cx, cy] = loop_centroid_2d(loops[ii]);
+            if (point_in_loop_2d(cx, cy, loops[hi])) {
+                // This island is inside this hole — add it as an inner loop.
+                std::vector<Vec3f> inner;
+                inner.reserve(loops[ii].size());
+                for (int vi : loops[ii])
+                    inner.push_back(its.vertices[vi]);
+                hb.inner_loops.push_back(std::move(inner));
+            }
+        }
 
         result.push_back(std::move(hb));
     }
