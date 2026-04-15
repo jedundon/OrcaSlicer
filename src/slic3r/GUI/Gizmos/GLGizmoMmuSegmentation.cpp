@@ -1611,7 +1611,7 @@ void GLGizmoMmuSegmentation::render_hole_fill_hover()
                     // renders above the surface (avoids z-fighting).
                     Vec3f nudge = m_hover_boundary.plane_normal.normalized() * 0.05f;
                     for (int i = 0; i < n; ++i)
-                        init_data.add_vertex(loop[i] + nudge);
+                        init_data.add_vertex(Vec3f(loop[i] + nudge));
 
                     for (int i = 0; i < n; ++i) {
                         init_data.add_line((unsigned int)i, (unsigned int)((i + 1) % n));
@@ -1622,7 +1622,7 @@ void GLGizmoMmuSegmentation::render_hole_fill_hover()
                         int base = (int)init_data.vertices_count();
                         int in_n = (int)inner.size();
                         for (int i = 0; i < in_n; ++i)
-                            init_data.add_vertex(inner[i] + nudge);
+                            init_data.add_vertex(Vec3f(inner[i] + nudge));
                         for (int i = 0; i < in_n; ++i)
                             init_data.add_line((unsigned int)(base + i), (unsigned int)(base + (i + 1) % in_n));
                     }
