@@ -259,6 +259,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
     }
 
     // Build HoleBoundary for each hole, then check which islands belong to it.
+    std::vector<bool> island_used(island_indices.size(), false);
     for (int hi : hole_indices) {
         HoleBoundary hb;
         hb.plane_normal = seed_normal;
@@ -273,7 +274,10 @@ std::vector<HoleBoundary> find_hole_boundaries(
         hb.plane_origin = centroid;
 
         // Find islands contained within this hole.
-        for (int ii : island_indices) {
+        for (int k = 0; k < (int)island_indices.size(); ++k) {
+            if (island_used[k])
+                continue;
+            int ii = island_indices[k];
             auto [cx, cy] = loop_centroid_2d(loops[ii]);
             if (point_in_loop_2d(cx, cy, loops[hi])) {
                 // This island is inside this hole — add it as an inner loop.
@@ -282,6 +286,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
                 for (int vi : loops[ii])
                     inner.push_back(its.vertices[vi]);
                 hb.inner_loops.push_back(std::move(inner));
+                island_used[k] = true;
             }
         }
 

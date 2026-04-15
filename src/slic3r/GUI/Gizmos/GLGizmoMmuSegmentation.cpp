@@ -694,6 +694,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         ImGui::SameLine(drag_left_width + sliders_left_width);
         ImGui::PushItemWidth(1.5 * slider_icon_width);
         ImGui::BBLDragFloat("##hole_fill_depth_input", &m_hole_fill_depth, 0.05f, 0.0f, 0.0f, "%.1f");
+        m_hole_fill_depth = std::clamp(m_hole_fill_depth, HoleFillDepthMin, HoleFillDepthMax);
 
         ImGui::Separator();
         m_imgui->text(_L("Click on a hole in the model to fill it with the selected filament color."));
