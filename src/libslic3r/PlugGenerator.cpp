@@ -208,4 +208,105 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     return mesh;
 }
 
+// ─── island negative volume ──────────────────────────────────────────────────
+
+TriangleMesh generate_island_negative(const std::vector<Vec3f> &inner_loop,
+                                      const Vec3f &plane_normal,
+                                      const Vec3f &plane_origin,
+                                      float depth)
+{
+    const int n = (int)inner_loop.size();
+    if (n < 3 || depth <= 0.f)
+        return TriangleMesh();
+
+    Vec3f normal = plane_normal.normalized();
+    Vec3f offset = -normal * depth;  // Inward direction (same as plug).
+
+    // Build a simple closed prism: front cap, back cap, side walls.
+    // This is a solid volume covering only the island area.
+    // When added as NEGATIVE_VOLUME, the slicer subtracts it from the
+    // plug+body union, leaving the island area with only the original body.
+
+    // We need to slightly expand the negative volume so it fully covers
+    // the island even with floating-point imprecision. Expand by a tiny
+    // epsilon along the plane and slightly beyond the surface.
+    constexpr float SURFACE_EPS = 0.01f;  // 10 microns past surface
+
+    std::vector<Vec3f> vertices;
+    std::vector<Vec3i32> faces;
+
+    // Front ring: slightly outside the surface (past the plug's front cap).
+    Vec3f front_offset = normal * SURFACE_EPS;
+    for (int i = 0; i < n; ++i)
+        vertices.push_back(inner_loop[i] + front_offset);
+
+    // Back ring: slightly past the plug's back cap.
+    Vec3f back_offset_total = offset - normal * SURFACE_EPS;
+    for (int i = 0; i < n; ++i)
+        vertices.push_back(inner_loop[i] + back_offset_total);
+
+    // Determine winding of the inner loop by projecting to 2D and checking area.
+    Vec3f u, v;
+    build_plane_frame(normal, u, v);
+
+    double signed_area = 0;
+    for (int i = 0; i < n; ++i) {
+        Vec3f rel_a = inner_loop[i] - plane_origin;
+        Vec3f rel_b = inner_loop[(i + 1) % n] - plane_origin;
+        double ax = rel_a.dot(u), ay = rel_a.dot(v);
+        double bx = rel_b.dot(u), by = rel_b.dot(v);
+        signed_area += (ax * by - bx * ay);
+    }
+    // signed_area > 0 means CCW when viewed from +normal direction.
+    bool is_ccw = (signed_area > 0);
+
+    // Front cap: outward normal along +normal requires CCW winding from +normal view.
+    // If loop is already CCW, use (0, i, i+1). If CW, use (0, i+1, i).
+    for (int i = 1; i < n - 1; ++i) {
+        if (is_ccw)
+            faces.push_back(Vec3i32(0, i, i + 1));
+        else
+            faces.push_back(Vec3i32(0, i + 1, i));
+    }
+
+    // Back cap: outward normal along -normal (reversed winding from front cap).
+    for (int i = 1; i < n - 1; ++i) {
+        if (is_ccw)
+            faces.push_back(Vec3i32(n, n + i + 1, n + i));
+        else
+            faces.push_back(Vec3i32(n, n + i, n + i + 1));
+    }
+
+    // Side walls: winding must be consistent with outward-facing normals.
+    // For CCW front loop, side quads go (f0, f1, b0) and (f1, b1, b0).
+    // For CW front loop, reverse: (f0, b0, f1) and (f1, b0, b1).
+    for (int i = 0; i < n; ++i) {
+        int i_next = (i + 1) % n;
+        int f0 = i;
+        int f1 = i_next;
+        int b0 = n + i;
+        int b1 = n + i_next;
+
+        if (is_ccw) {
+            faces.push_back(Vec3i32(f0, b0, f1));
+            faces.push_back(Vec3i32(f1, b0, b1));
+        } else {
+            faces.push_back(Vec3i32(f0, f1, b0));
+            faces.push_back(Vec3i32(f1, b1, b0));
+        }
+    }
+
+    indexed_triangle_set its;
+    its.vertices = std::move(vertices);
+    its.indices  = std::move(faces);
+
+    its_merge_vertices(its);
+
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Island negative: " << n
+        << " verts, depth=" << depth << ", eps=" << SURFACE_EPS;
+
+    TriangleMesh mesh(std::move(its));
+    return mesh;
+}
+
 } // namespace Slic3r

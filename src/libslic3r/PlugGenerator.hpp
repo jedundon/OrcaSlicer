@@ -28,6 +28,24 @@ constexpr float PLUG_DEFAULT_DEPTH_MM = 1.0f;
 //   coordinate space as the original mesh.
 TriangleMesh generate_plug(const HoleBoundary &boundary, float depth = PLUG_DEFAULT_DEPTH_MM);
 
+// Generate a small "negative" plug that covers an inner loop (island).
+// This mesh is meant to be added as a NEGATIVE_VOLUME to subtract the island
+// area from the main plug, preventing the slicer's boolean union from filling
+// the island with the plug's extruder.
+//
+// Parameters:
+//   inner_loop    - The 3D vertices of the inner loop (island boundary).
+//   plane_normal  - The outward-facing normal of the hole's plane.
+//   plane_origin  - A point on the hole's plane (used for 2D projection).
+//   depth         - How deep the negative volume extends (should match plug depth).
+//
+// Returns:
+//   A watertight TriangleMesh representing the negative volume.
+TriangleMesh generate_island_negative(const std::vector<Vec3f> &inner_loop,
+                                      const Vec3f &plane_normal,
+                                      const Vec3f &plane_origin,
+                                      float depth = PLUG_DEFAULT_DEPTH_MM);
+
 } // namespace Slic3r
 
 #endif // slic3r_PlugGenerator_hpp_

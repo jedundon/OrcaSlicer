@@ -1538,6 +1538,24 @@ void GLGizmoMmuSegmentation::perform_hole_fill(const Vec2d &mouse_position)
     // sits correctly in the object's coordinate space.
     new_vol->set_transformation(hit_volume->get_transformation());
 
+    // Add negative volumes for inner loops (islands) so the slicer's boolean
+    // union doesn't fill the island area with the plug's extruder.
+    for (size_t il = 0; il < boundary.inner_loops.size(); ++il) {
+        TriangleMesh neg = generate_island_negative(
+            boundary.inner_loops[il],
+            boundary.plane_normal,
+            boundary.plane_origin,
+            m_hole_fill_depth);
+        if (neg.empty())
+            continue;
+
+        ModelVolume *neg_vol = mo_mut->add_volume(std::move(neg), ModelVolumeType::NEGATIVE_VOLUME, false);
+        neg_vol->set_new_unique_id();
+        neg_vol->name = "HoleFill_neg_" + std::to_string(hit_volume_raw_idx)
+            + "_f" + std::to_string(facet_idx) + "_i" + std::to_string(il);
+        neg_vol->set_transformation(hit_volume->get_transformation());
+    }
+
     // Notify the system that the model changed.
     wxGetApp().plater()->update();
     wxGetApp().obj_list()->update_after_undo_redo();
