@@ -367,6 +367,161 @@ std::vector<HoleBoundary> find_hole_boundaries(
         }
     }
 
+    // ── Step 7: Detect disconnected coplanar islands ─────────────────────
+    // Some islands (e.g., the counter inside the letter "A") are separate
+    // coplanar face regions NOT connected to the main face region. Their
+    // boundary loops won't appear in the main flood-fill. We scan for them
+    // by flood-filling other coplanar faces and checking if their projected
+    // boundaries fall inside any detected hole.
+    if (!result.empty()) {
+        // Collect faces already visited (in the main region).
+        // in_region already marks the main region.
+
+        // We'll track all faces that belong to ANY island region we discover
+        // to avoid re-processing.
+        std::vector<bool> island_visited(its.indices.size(), false);
+        for (int fi = 0; fi < (int)its.indices.size(); ++fi)
+            if (in_region[fi]) island_visited[fi] = true;
+
+        for (int fi = 0; fi < (int)its.indices.size(); ++fi) {
+            if (island_visited[fi]) continue;
+
+            Vec3f fn = face_normal(its, fi);
+            // Must be coplanar with the seed face.
+            if (fn.dot(seed_normal) < cos_tolerance) continue;
+
+            // Flood-fill this separate coplanar region.
+            std::vector<int> island_faces;
+            std::queue<int> island_queue;
+            island_queue.push(fi);
+            island_visited[fi] = true;
+            while (!island_queue.empty()) {
+                int cur = island_queue.front();
+                island_queue.pop();
+                island_faces.push_back(cur);
+                for (int ni = 0; ni < 3; ++ni) {
+                    int nb = neighbors[cur][ni];
+                    if (nb < 0 || island_visited[nb]) continue;
+                    Vec3f nn = face_normal(its, nb);
+                    if (nn.dot(seed_normal) >= cos_tolerance) {
+                        island_visited[nb] = true;
+                        island_queue.push(nb);
+                    }
+                }
+            }
+
+            if (island_faces.size() < 1) continue;
+
+            // Build a set for fast lookup.
+            std::unordered_set<int> island_set(island_faces.begin(), island_faces.end());
+
+            // Find boundary edges of this island region.
+            std::vector<HalfEdge> isl_boundary_edges;
+            for (int ifi : island_faces) {
+                const Vec3i32 &f = its.indices[ifi];
+                for (int ei = 0; ei < 3; ++ei) {
+                    int nb = neighbors[ifi][ei];
+                    if (nb < 0 || island_set.find(nb) == island_set.end()) {
+                        int v_from = f[ei];
+                        int v_to   = f[(ei + 1) % 3];
+                        isl_boundary_edges.push_back({v_from, v_to, ifi});
+                    }
+                }
+            }
+
+            if (isl_boundary_edges.empty()) continue;
+
+            // Chain into loops (same algorithm as main region).
+            std::unordered_map<int, std::vector<int>> isl_from_map;
+            for (int i = 0; i < (int)isl_boundary_edges.size(); ++i)
+                isl_from_map[isl_boundary_edges[i].from].push_back(i);
+
+            std::vector<bool> isl_used(isl_boundary_edges.size(), false);
+            std::vector<std::vector<int>> isl_loops;
+
+            for (int start = 0; start < (int)isl_boundary_edges.size(); ++start) {
+                if (isl_used[start]) continue;
+                std::vector<int> loop_verts;
+                int current = start;
+                while (!isl_used[current]) {
+                    isl_used[current] = true;
+                    loop_verts.push_back(isl_boundary_edges[current].from);
+                    int next_from = isl_boundary_edges[current].to;
+                    int next = -1;
+                    auto it = isl_from_map.find(next_from);
+                    if (it != isl_from_map.end()) {
+                        for (int idx : it->second) {
+                            if (!isl_used[idx]) { next = idx; break; }
+                        }
+                    }
+                    if (next < 0) break;
+                    current = next;
+                }
+                if (loop_verts.size() >= 3)
+                    isl_loops.push_back(std::move(loop_verts));
+            }
+
+            if (isl_loops.empty()) continue;
+
+            // Use the outermost loop (largest area) as the island's boundary.
+            int best_loop = 0;
+            float best_area = 0.f;
+            for (int li = 0; li < (int)isl_loops.size(); ++li) {
+                float a = std::abs(signed_area_2d(isl_loops[li]));
+                if (a > best_area) {
+                    best_area = a;
+                    best_loop = li;
+                }
+            }
+
+            // Compute 2D centroid of this island's outer loop.
+            const auto &isl_verts = isl_loops[best_loop];
+            float icx = 0.f, icy = 0.f;
+            for (int vi : isl_verts) {
+                icx += its.vertices[vi][axis0];
+                icy += its.vertices[vi][axis1];
+            }
+            icx /= (float)isl_verts.size();
+            icy /= (float)isl_verts.size();
+
+            // Check if this island falls inside any of our detected holes.
+            for (int hi = 0; hi < (int)result.size(); ++hi) {
+                // Project the hole loop to 2D for containment test.
+                // We need the hole's vertices in terms of axis0/axis1.
+                // The hole loop is stored as 3D Vec3f, so we use the same projection.
+                bool inside = false;
+                {
+                    const auto &hloop = result[hi].loop;
+                    int hn = (int)hloop.size();
+                    // Ray-casting point-in-polygon with Vec3f loop.
+                    for (int i = 0, j = hn - 1; i < hn; j = i++) {
+                        float yi = hloop[i][axis1];
+                        float yj = hloop[j][axis1];
+                        float xi = hloop[i][axis0];
+                        float xj = hloop[j][axis0];
+                        if (((yi > icy) != (yj > icy)) &&
+                            (icx < (xj - xi) * (icy - yi) / (yj - yi) + xi))
+                            inside = !inside;
+                    }
+                }
+
+                if (inside) {
+                    // This disconnected region is an island inside this hole.
+                    std::vector<Vec3f> inner;
+                    inner.reserve(isl_verts.size());
+                    for (int vi : isl_verts)
+                        inner.push_back(its.vertices[vi]);
+                    result[hi].inner_loops.push_back(std::move(inner));
+
+                    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Found disconnected island ("
+                        << island_faces.size() << " faces, " << isl_verts.size()
+                        << " verts) inside hole " << hi;
+                    break; // Each island belongs to one hole.
+                }
+            }
+        }
+    }
+
     return result;
 }
 
