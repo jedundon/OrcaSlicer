@@ -166,7 +166,6 @@ std::vector<HoleBoundary> find_hole_boundaries(
     {
         std::string msg = "[HoleFinder] Found " + std::to_string(loops.size()) + " loops:";
         for (int i = 0; i < (int)loops.size(); ++i) {
-            auto [cx, cy] = loop_centroid_2d(loops[i]);
             // Also compute 3D centroid for spatial identification
             Vec3f c3d = Vec3f::Zero();
             for (int vi : loops[i]) c3d += its.vertices[vi];
