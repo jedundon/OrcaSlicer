@@ -7,7 +7,7 @@
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
-#include <cstdio>  // for debug logging
+#include <boost/log/trivial.hpp>
 
 namespace Slic3r {
 
@@ -115,10 +115,9 @@ std::vector<HoleBoundary> find_hole_boundaries(
     if (boundary_edges.empty())
         return result;
 
-    fprintf(stderr, "[HoleFinder] Seed facet %d, region has %d faces, %d boundary edges\n",
-            seed_facet_idx,
-            (int)std::count(in_region.begin(), in_region.end(), true),
-            (int)boundary_edges.size());
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Seed facet " << seed_facet_idx
+        << ", region has " << (int)std::count(in_region.begin(), in_region.end(), true)
+        << " faces, " << (int)boundary_edges.size() << " boundary edges";
 
     // Step 4: Chain boundary half-edges into closed loops.
     // Build a map: from_vertex -> list of half-edge indices.
@@ -163,10 +162,12 @@ std::vector<HoleBoundary> find_hole_boundaries(
     if (loops.empty())
         return result;
 
-    fprintf(stderr, "[HoleFinder] Found %d loops. Sizes:", (int)loops.size());
-    for (int i = 0; i < (int)loops.size(); ++i)
-        fprintf(stderr, " [%d]=%d", i, (int)loops[i].size());
-    fprintf(stderr, "\n");
+    {
+        std::string msg = "[HoleFinder] Found " + std::to_string(loops.size()) + " loops. Sizes:";
+        for (int i = 0; i < (int)loops.size(); ++i)
+            msg += " [" + std::to_string(i) + "]=" + std::to_string(loops[i].size());
+        BOOST_LOG_TRIVIAL(warning) << msg;
+    }
 
     // Step 5: Classify loops.
     // The outermost loop (largest by bounding box area or signed area) is the
@@ -203,13 +204,13 @@ std::vector<HoleBoundary> find_hole_boundaries(
     float max_abs_area = 0.f;
     for (int i = 0; i < (int)loops.size(); ++i) {
         float a = std::abs(signed_area_2d(loops[i]));
-        fprintf(stderr, "[HoleFinder] Loop %d: abs_area=%.4f, verts=%d\n", i, a, (int)loops[i].size());
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Loop " << i << ": abs_area=" << a << ", verts=" << (int)loops[i].size();
         if (a > max_abs_area) {
             max_abs_area = a;
             perimeter_idx = i;
         }
     }
-    fprintf(stderr, "[HoleFinder] Perimeter = loop %d (area %.4f)\n", perimeter_idx, max_abs_area);
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Perimeter = loop " << perimeter_idx << " (area " << max_abs_area << ")";
 
     // Step 6: Classify non-perimeter loops using nesting depth.
     //
@@ -263,15 +264,17 @@ std::vector<HoleBoundary> find_hole_boundaries(
         }
     }
 
-    fprintf(stderr, "[HoleFinder] Nesting depths:");
-    for (int i = 0; i < num_loops; ++i)
-        fprintf(stderr, " [%d]=%d", i, nesting_depth[i]);
-    fprintf(stderr, "\n");
+    {
+        std::string msg = "[HoleFinder] Nesting depths:";
+        for (int i = 0; i < num_loops; ++i)
+            msg += " [" + std::to_string(i) + "]=" + std::to_string(nesting_depth[i]);
+        BOOST_LOG_TRIVIAL(warning) << msg;
+    }
     // Sanity check: perimeter should be depth 0 (not contained by anything).
     // If it's not, our perimeter detection was wrong; bail out.
     if (nesting_depth[perimeter_idx] != 0) {
-        fprintf(stderr, "[HoleFinder] ERROR: perimeter loop %d has depth %d (expected 0). Bailing out.\n",
-                perimeter_idx, nesting_depth[perimeter_idx]);
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] ERROR: perimeter loop " << perimeter_idx
+            << " has depth " << nesting_depth[perimeter_idx] << " (expected 0). Bailing out.";
         return result;
     }
 
@@ -295,14 +298,11 @@ std::vector<HoleBoundary> find_hole_boundaries(
             island_loops.push_back({i, nesting_depth[i]});
     }
 
-    fprintf(stderr, "[HoleFinder] Classification: %d holes, %d islands\n",
-            (int)hole_loops.size(), (int)island_loops.size());
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Classification: " << hole_loops.size() << " holes, " << island_loops.size() << " islands";
     for (const auto &hl : hole_loops)
-        fprintf(stderr, "  Hole: loop %d (depth %d, verts %d)\n",
-                hl.loop_idx, hl.depth, (int)loops[hl.loop_idx].size());
+        BOOST_LOG_TRIVIAL(warning) << "  Hole: loop " << hl.loop_idx << " (depth " << hl.depth << ", verts " << loops[hl.loop_idx].size() << ")";
     for (const auto &il : island_loops)
-        fprintf(stderr, "  Island: loop %d (depth %d, verts %d)\n",
-                il.loop_idx, il.depth, (int)loops[il.loop_idx].size());
+        BOOST_LOG_TRIVIAL(warning) << "  Island: loop " << il.loop_idx << " (depth " << il.depth << ", verts " << loops[il.loop_idx].size() << ")";
 
     // Build HoleBoundary for each hole loop.
     // Map loop_idx -> index in result for parent lookup.
