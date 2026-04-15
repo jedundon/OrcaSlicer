@@ -805,6 +805,25 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
                 m_triangle_selectors[idx]->request_update_render_data(true);
             }
 
+        // Also remove any hole fill plug volumes.
+        // Iterate in reverse to safely delete by index.
+        {
+            int object_idx = m_parent.get_selection().get_object_idx();
+            ModelObject *mo_mut = wxGetApp().model().objects[object_idx];
+            bool removed_any = false;
+            for (int vi = (int)mo_mut->volumes.size() - 1; vi >= 0; --vi) {
+                if (mo_mut->volumes[vi]->name.rfind("HoleFill_", 0) == 0) {
+                    mo_mut->delete_volume(vi);
+                    removed_any = true;
+                }
+            }
+            if (removed_any) {
+                // Reinitialize selectors since volume list changed.
+                wxGetApp().plater()->update();
+                wxGetApp().obj_list()->update_after_undo_redo();
+            }
+        }
+
         update_model_object();
         m_parent.set_as_dirty();
     }
