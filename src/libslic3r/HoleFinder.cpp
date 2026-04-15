@@ -377,20 +377,43 @@ std::vector<HoleBoundary> find_hole_boundaries(
         // Collect faces already visited (in the main region).
         // in_region already marks the main region.
 
+        // Compute the plane offset of the main face region.
+        // d = seed_normal · vertex, for any vertex on the main face.
+        // Disconnected islands must lie on the SAME plane (same offset),
+        // not just have the same normal direction. This prevents channel
+        // floor faces (e.g., bottom of engraved N or E) from being
+        // incorrectly added as islands — they have the same normal but
+        // are offset inward from the surface.
+        float main_plane_d = its.vertices[its.indices[seed_facet_idx][0]].dot(seed_normal);
+        const float plane_tolerance = 0.1f; // 0.1mm tolerance for same-plane check
+
         // We'll track all faces that belong to ANY island region we discover
         // to avoid re-processing.
         std::vector<bool> island_visited(its.indices.size(), false);
         for (int fi = 0; fi < (int)its.indices.size(); ++fi)
             if (in_region[fi]) island_visited[fi] = true;
 
+        int regions_scanned = 0;
+        int islands_found = 0;
+
         for (int fi = 0; fi < (int)its.indices.size(); ++fi) {
             if (island_visited[fi]) continue;
 
             Vec3f fn = face_normal(its, fi);
-            // Must be coplanar with the seed face.
+            // Must be coplanar with the seed face (same normal direction).
             if (fn.dot(seed_normal) < cos_tolerance) continue;
 
+            // Must be on the same geometric plane (same offset along normal).
+            // This filters out channel floor faces that have the same normal
+            // but are recessed from the surface.
+            float face_d = its.vertices[its.indices[fi][0]].dot(seed_normal);
+            if (std::abs(face_d - main_plane_d) > plane_tolerance) {
+                island_visited[fi] = true; // Don't revisit
+                continue;
+            }
+
             // Flood-fill this separate coplanar region.
+            // Only grow to faces on the same plane (same normal AND same offset).
             std::vector<int> island_faces;
             std::queue<int> island_queue;
             island_queue.push(fi);
@@ -403,12 +426,15 @@ std::vector<HoleBoundary> find_hole_boundaries(
                     int nb = neighbors[cur][ni];
                     if (nb < 0 || island_visited[nb]) continue;
                     Vec3f nn = face_normal(its, nb);
-                    if (nn.dot(seed_normal) >= cos_tolerance) {
-                        island_visited[nb] = true;
-                        island_queue.push(nb);
-                    }
+                    if (nn.dot(seed_normal) < cos_tolerance) continue;
+                    float nb_d = its.vertices[its.indices[nb][0]].dot(seed_normal);
+                    if (std::abs(nb_d - main_plane_d) > plane_tolerance) continue;
+                    island_visited[nb] = true;
+                    island_queue.push(nb);
                 }
             }
+
+            regions_scanned++;
 
             if (island_faces.size() < 1) continue;
 
@@ -512,14 +538,20 @@ std::vector<HoleBoundary> find_hole_boundaries(
                     for (int vi : isl_verts)
                         inner.push_back(its.vertices[vi]);
                     result[hi].inner_loops.push_back(std::move(inner));
+                    islands_found++;
 
                     BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Found disconnected island ("
                         << island_faces.size() << " faces, " << isl_verts.size()
-                        << " verts) inside hole " << hi;
+                        << " verts, plane_d=" << face_d << ") inside hole " << hi;
                     break; // Each island belongs to one hole.
                 }
             }
         }
+
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Step 7: scanned "
+            << regions_scanned << " coplanar regions, found "
+            << islands_found << " disconnected islands"
+            << " (main_plane_d=" << main_plane_d << ")";
     }
 
     return result;
