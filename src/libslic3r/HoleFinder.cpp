@@ -395,13 +395,16 @@ std::vector<HoleBoundary> find_hole_boundaries(
 
         int regions_scanned = 0;
         int islands_found = 0;
+        int skipped_in_region = 0;
+        int skipped_normal = 0;
+        int skipped_plane = 0;
 
         for (int fi = 0; fi < (int)its.indices.size(); ++fi) {
-            if (island_visited[fi]) continue;
+            if (island_visited[fi]) { skipped_in_region++; continue; }
 
             Vec3f fn = face_normal(its, fi);
             // Must be coplanar with the seed face (same normal direction).
-            if (fn.dot(seed_normal) < cos_tolerance) continue;
+            if (fn.dot(seed_normal) < cos_tolerance) { skipped_normal++; continue; }
 
             // Must be on the same geometric plane (same offset along normal).
             // This filters out channel floor faces that have the same normal
@@ -409,6 +412,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
             float face_d = its.vertices[its.indices[fi][0]].dot(seed_normal);
             if (std::abs(face_d - main_plane_d) > plane_tolerance) {
                 island_visited[fi] = true; // Don't revisit
+                skipped_plane++;
                 continue;
             }
 
@@ -542,7 +546,9 @@ std::vector<HoleBoundary> find_hole_boundaries(
 
                     BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Found disconnected island ("
                         << island_faces.size() << " faces, " << isl_verts.size()
-                        << " verts, plane_d=" << face_d << ") inside hole " << hi;
+                        << " verts, plane_d=" << face_d
+                        << ", centroid_2d=(" << icx << "," << icy << ")"
+                        << ") inside hole " << hi;
                     break; // Each island belongs to one hole.
                 }
             }
@@ -551,7 +557,9 @@ std::vector<HoleBoundary> find_hole_boundaries(
         BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Step 7: scanned "
             << regions_scanned << " coplanar regions, found "
             << islands_found << " disconnected islands"
-            << " (main_plane_d=" << main_plane_d << ")";
+            << " (main_plane_d=" << main_plane_d
+            << ", skipped: " << skipped_in_region << " in_region, "
+            << skipped_normal << " normal, " << skipped_plane << " plane)";
     }
 
     return result;
