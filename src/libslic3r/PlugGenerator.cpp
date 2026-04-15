@@ -3,6 +3,8 @@
 #include "Tesselate.hpp"
 #include "libslic3r.h" // for SCALING_FACTOR
 
+#include <boost/log/trivial.hpp>
+
 #include <cassert>
 #include <cmath>
 #include <algorithm>
@@ -87,10 +89,19 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     }
 
     // ── Step 2: Triangulate the cap face ────────────────────────────────
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] ExPolygon contour: " << expoly.contour.points.size()
+        << " pts, " << expoly.holes.size() << " holes";
+    for (size_t hi = 0; hi < expoly.holes.size(); ++hi) {
+        BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Hole " << hi << ": "
+            << expoly.holes[hi].points.size() << " pts, area="
+            << std::abs(expoly.holes[hi].area());
+    }
+
     // Use the existing Slic3r tessellation which handles concave polygons.
     std::vector<Vec2d> tri_pts_2d = triangulate_expolygon_2d(expoly, NORMALS_UP);
     // tri_pts_2d contains groups of 3 points (triangle vertices).
     int num_cap_tris = (int)tri_pts_2d.size() / 3;
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Tessellation produced " << num_cap_tris << " triangles";
     if (num_cap_tris == 0)
         return TriangleMesh();
 
