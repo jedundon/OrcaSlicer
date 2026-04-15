@@ -198,18 +198,17 @@ std::vector<HoleBoundary> find_hole_boundaries(
         }
     }
 
-    // Step 6: Classify non-perimeter loops into holes and islands.
-    // A "hole" is a loop whose interior is a recess (to be filled).
-    // An "island" is a loop inside a hole whose interior is NOT a recess
-    // (e.g., the triangular counter inside the letter "A").
+    // Step 6: Classify non-perimeter loops using nesting depth.
     //
-    // Strategy: use signed area orientation + point-in-polygon containment.
-    // - Loops with one orientation (e.g., CW in the projected 2D plane) are holes.
-    // - Loops with the opposite orientation (CCW) that are geometrically contained
-    //   inside a hole loop are islands belonging to that hole.
-    // - The perimeter loop is the largest and is excluded.
-    //
-    // We use a simple 2D point-in-polygon (ray casting) test for containment.
+    // Instead of relying on winding orientation (which can be unreliable
+    // depending on mesh topology), we use geometric containment:
+    //   - For each loop, count how many OTHER loops contain its centroid.
+    //   - Nesting depth 0 = perimeter (outermost, already identified).
+    //   - Nesting depth 1 = holes (contained only by the perimeter).
+    //   - Nesting depth 2 = islands inside holes (contained by perimeter + one hole).
+    //   - Depth 3+ would be holes-within-islands, etc. (rare, but handled correctly).
+    //   - Odd depth = hole (recess to fill), even depth = island (surface to preserve).
+    //     (Perimeter at depth 0 is even = not a hole, which is correct.)
 
     // Helper: 2D point-in-polygon using ray casting (projected coordinates).
     auto point_in_loop_2d = [&](float px, float py, const std::vector<int> &verts) -> bool {
@@ -238,59 +237,85 @@ std::vector<HoleBoundary> find_hole_boundaries(
         return {cx / nv, cy / nv};
     };
 
-    // Determine the signed area of the perimeter to establish orientation convention.
-    float perimeter_area = signed_area_2d(loops[perimeter_idx]);
-    // Holes have the opposite sign from the perimeter; islands have the same sign.
-    // (The perimeter encloses the face region; holes are "cut out" of it.)
+    // Compute nesting depth for each loop.
+    int num_loops = (int)loops.size();
+    std::vector<int> nesting_depth(num_loops, 0);
 
-    // Collect non-perimeter loop indices, separated by role.
-    std::vector<int> hole_indices;   // loops that are holes (recesses)
-    std::vector<int> island_indices; // loops that are islands (raised areas inside holes)
+    for (int i = 0; i < num_loops; ++i) {
+        auto [cx, cy] = loop_centroid_2d(loops[i]);
+        for (int j = 0; j < num_loops; ++j) {
+            if (i == j) continue;
+            if (point_in_loop_2d(cx, cy, loops[j]))
+                nesting_depth[i]++;
+        }
+    }
+    // Sanity check: perimeter should be depth 0 (not contained by anything).
+    // If it's not, our perimeter detection was wrong; bail out.
+    if (nesting_depth[perimeter_idx] != 0)
+        return result;
 
-    for (int i = 0; i < (int)loops.size(); ++i) {
-        if (i == perimeter_idx)
-            continue;
-        float area = signed_area_2d(loops[i]);
-        // Hole loops have opposite sign from perimeter; island loops have same sign.
-        if ((area > 0.f) != (perimeter_area > 0.f))
-            hole_indices.push_back(i);
-        else
-            island_indices.push_back(i);
+    // Odd depth = hole, even depth (>0) = island.
+    // Build a parent map: for each island (even depth > 0), find which
+    // hole (odd depth) at depth-1 contains it.
+
+    // First, collect all hole loops (odd depth).
+    struct LoopInfo {
+        int loop_idx;
+        int depth;
+    };
+    std::vector<LoopInfo> hole_loops;    // odd depth
+    std::vector<LoopInfo> island_loops;  // even depth > 0
+
+    for (int i = 0; i < num_loops; ++i) {
+        if (i == perimeter_idx) continue;
+        if (nesting_depth[i] % 2 == 1)
+            hole_loops.push_back({i, nesting_depth[i]});
+        else if (nesting_depth[i] > 0)
+            island_loops.push_back({i, nesting_depth[i]});
     }
 
-    // Build HoleBoundary for each hole, then check which islands belong to it.
-    std::vector<bool> island_used(island_indices.size(), false);
-    for (int hi : hole_indices) {
+    // Build HoleBoundary for each hole loop.
+    // Map loop_idx -> index in result for parent lookup.
+    std::unordered_map<int, int> hole_loop_to_result;
+
+    for (const auto &hl : hole_loops) {
         HoleBoundary hb;
         hb.plane_normal = seed_normal;
-        hb.loop.reserve(loops[hi].size());
+        hb.loop.reserve(loops[hl.loop_idx].size());
 
         Vec3f centroid = Vec3f::Zero();
-        for (int vi : loops[hi]) {
+        for (int vi : loops[hl.loop_idx]) {
             hb.loop.push_back(its.vertices[vi]);
             centroid += its.vertices[vi];
         }
         centroid /= (float)hb.loop.size();
         hb.plane_origin = centroid;
 
-        // Find islands contained within this hole.
-        for (int k = 0; k < (int)island_indices.size(); ++k) {
-            if (island_used[k])
-                continue;
-            int ii = island_indices[k];
-            auto [cx, cy] = loop_centroid_2d(loops[ii]);
-            if (point_in_loop_2d(cx, cy, loops[hi])) {
-                // This island is inside this hole — add it as an inner loop.
-                std::vector<Vec3f> inner;
-                inner.reserve(loops[ii].size());
-                for (int vi : loops[ii])
-                    inner.push_back(its.vertices[vi]);
-                hb.inner_loops.push_back(std::move(inner));
-                island_used[k] = true;
-            }
-        }
-
+        hole_loop_to_result[hl.loop_idx] = (int)result.size();
         result.push_back(std::move(hb));
+    }
+
+    // Assign each island to its parent hole (the odd-depth loop at depth-1
+    // that contains it).
+    for (const auto &il : island_loops) {
+        auto [cx, cy] = loop_centroid_2d(loops[il.loop_idx]);
+        int target_depth = il.depth - 1; // The hole that directly contains this island
+
+        for (const auto &hl : hole_loops) {
+            if (hl.depth != target_depth) continue;
+            if (!point_in_loop_2d(cx, cy, loops[hl.loop_idx])) continue;
+
+            // Found the parent hole.
+            auto it = hole_loop_to_result.find(hl.loop_idx);
+            if (it != hole_loop_to_result.end()) {
+                std::vector<Vec3f> inner;
+                inner.reserve(loops[il.loop_idx].size());
+                for (int vi : loops[il.loop_idx])
+                    inner.push_back(its.vertices[vi]);
+                result[it->second].inner_loops.push_back(std::move(inner));
+            }
+            break; // Each island belongs to exactly one parent hole.
+        }
     }
 
     return result;
