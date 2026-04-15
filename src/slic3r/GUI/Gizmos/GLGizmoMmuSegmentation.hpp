@@ -84,6 +84,8 @@ public:
     bool on_number_key_down(int number);
     bool on_key_down_select_tool_type(int keyCode);
 
+    bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down) override;
+
 protected:
     // BBS
     ColorRGBA get_cursor_hover_color() const override;
@@ -155,7 +157,6 @@ private:
 
     // Hole Fill methods
     void perform_hole_fill(const Vec2d &mouse_position);
-    bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down) override;
 
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.
