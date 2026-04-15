@@ -39,6 +39,62 @@ static Vec3f unproject_to_3d(const Vec2d &pt2d, const Vec3f &origin,
     return origin + (float)pt2d.x() * u + (float)pt2d.y() * v;
 }
 
+// Maximum Z-span (mm) for a single side-wall quad.  Quads whose boundary
+// edge spans more than this in Z are subdivided into strips so the slicer's
+// horizontal Z-cuts don't hit diagonal triangle edges that would create
+// visible sawtooth artifacts.
+static constexpr float SIDE_WALL_Z_STEP = 0.05f;  // 50 µm
+
+// Emit side-wall quads between two boundary-ring edge endpoints,
+// subdividing along Z when the edge's Z-span exceeds SIDE_WALL_Z_STEP.
+// `front_a / front_b` are the 3D positions of the two consecutive ring
+// vertices on the front cap; `back_offset` is the vector from front to back.
+// `reverse_winding` flips the triangle winding (used for inner-loop walls).
+static void emit_side_wall_quads(
+    const Vec3f &front_a, const Vec3f &front_b,
+    const Vec3f &back_offset,
+    bool         reverse_winding,
+    std::vector<Vec3f>    &vertices,
+    std::vector<Vec3i32>  &faces)
+{
+    float dz = std::abs(front_b.z() - front_a.z());
+
+    // Number of subdivisions along this edge.
+    int n_sub = 1;
+    if (dz > SIDE_WALL_Z_STEP)
+        n_sub = (int)std::ceil(dz / SIDE_WALL_Z_STEP);
+
+    // We always emit new vertices for the intermediate strip endpoints.
+    // The first point coincides with front_a, the last with front_b.
+    int base = (int)vertices.size();
+
+    // Push front and back ring for each subdivision point.
+    for (int s = 0; s <= n_sub; ++s) {
+        float t = (float)s / (float)n_sub;
+        Vec3f pt_front = front_a + t * (front_b - front_a);
+        vertices.push_back(pt_front);
+        vertices.push_back(pt_front + back_offset);
+    }
+    // Vertex layout at `base`:
+    //   base + 2*s     = front point for strip s
+    //   base + 2*s + 1 = back  point for strip s
+
+    for (int s = 0; s < n_sub; ++s) {
+        int f0 = base + 2 * s;       // front current
+        int b0 = base + 2 * s + 1;   // back  current
+        int f1 = base + 2 * (s + 1); // front next
+        int b1 = base + 2 * (s + 1) + 1; // back next
+
+        if (!reverse_winding) {
+            faces.push_back(Vec3i32(f0, b0, f1));
+            faces.push_back(Vec3i32(f1, b0, b1));
+        } else {
+            faces.push_back(Vec3i32(f0, f1, b0));
+            faces.push_back(Vec3i32(f1, b1, b0));
+        }
+    }
+}
+
 // ─── main implementation ─────────────────────────────────────────────────────
 
 TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
@@ -106,71 +162,41 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
         return TriangleMesh();
 
     // ── Step 3: Build the full plug mesh ────────────────────────────────
-    // Vertices layout:
-    //   [0,      n-1]       : front cap ring (flush with surface)
-    //   [n,      2n-1]      : back cap ring  (inset by depth)
-    //   [2n,     2n+Nt*3-1] : front cap triangulation vertices (may not align with ring)
-    //   [2n+Nt*3, ...]      : back cap triangulation vertices
-    //
-    // Actually, let's simplify: since the triangulated cap vertices are in 2D
-    // and we need them in 3D, and the ring vertices are the boundary loop itself,
-    // we'll build separate vertex arrays and merge.
+    // Side-wall quads are emitted by emit_side_wall_quads() which
+    // Z-subdivides edges to avoid slicer zigzag artifacts.  Cap
+    // triangles come from the tessellated 2D ExPolygon.
 
     std::vector<Vec3f> vertices;
     std::vector<Vec3i32> faces;
 
     Vec3f offset = -normal * depth;  // Inward direction.
 
-    // ── 3a: Front ring vertices [0 .. n-1] ──
-    for (int i = 0; i < n; ++i)
-        vertices.push_back(loop[i]);
-
-    // ── 3b: Back ring vertices [n .. 2n-1] ──
-    for (int i = 0; i < n; ++i)
-        vertices.push_back(loop[i] + offset);
-
     // ── 3c: Side walls for outer boundary ──
-    // Connect front ring to back ring with two triangles per edge.
+    // Each edge is Z-subdivided to avoid slicer zigzag artifacts.
+    int total_side_tris = 0;
     for (int i = 0; i < n; ++i) {
         int i_next = (i + 1) % n;
-        int f0 = i;           // front current
-        int f1 = i_next;      // front next
-        int b0 = n + i;       // back current
-        int b1 = n + i_next;  // back next
-
-        // Two triangles forming a quad.
-        // Winding: outward-facing sides.
-        faces.push_back(Vec3i32(f0, b0, f1));
-        faces.push_back(Vec3i32(f1, b0, b1));
+        size_t before = faces.size();
+        emit_side_wall_quads(loop[i], loop[i_next], offset,
+                             /*reverse_winding=*/false, vertices, faces);
+        total_side_tris += (int)(faces.size() - before);
     }
 
     // ── 3c-2: Side walls for inner loops (island holes) ──
-    // Each inner loop needs its own side wall ring, with reversed winding
-    // (the "outside" of an inner hole faces inward toward the hole center).
+    // Reversed winding: the "outside" of an inner hole faces inward.
     for (const auto &inner : boundary.inner_loops) {
         int in_n = (int)inner.size();
         if (in_n < 3) continue;
 
-        int inner_front_base = (int)vertices.size();
-        for (int i = 0; i < in_n; ++i)
-            vertices.push_back(inner[i]);
-
-        int inner_back_base = (int)vertices.size();
-        for (int i = 0; i < in_n; ++i)
-            vertices.push_back(inner[i] + offset);
-
         for (int i = 0; i < in_n; ++i) {
             int i_next = (i + 1) % in_n;
-            int f0 = inner_front_base + i;
-            int f1 = inner_front_base + i_next;
-            int b0 = inner_back_base + i;
-            int b1 = inner_back_base + i_next;
-
-            // Reversed winding compared to outer walls (faces inward).
-            faces.push_back(Vec3i32(f0, f1, b0));
-            faces.push_back(Vec3i32(f1, b1, b0));
+            emit_side_wall_quads(inner[i], inner[i_next], offset,
+                                 /*reverse_winding=*/true, vertices, faces);
         }
     }
+
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Side walls: " << total_side_tris
+        << " triangles (Z-step=" << SIDE_WALL_Z_STEP << "mm)";
 
     // ── 3d: Front cap triangles ──
     // Convert triangulated 2D points back to 3D and add as vertices.
