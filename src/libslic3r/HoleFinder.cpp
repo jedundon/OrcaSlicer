@@ -116,6 +116,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
         return result;
 
     BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Seed facet " << seed_facet_idx
+        << ", normal=(" << seed_normal.x() << "," << seed_normal.y() << "," << seed_normal.z() << ")"
         << ", region has " << (int)std::count(in_region.begin(), in_region.end(), true)
         << " faces, " << (int)boundary_edges.size() << " boundary edges";
 
@@ -163,9 +164,16 @@ std::vector<HoleBoundary> find_hole_boundaries(
         return result;
 
     {
-        std::string msg = "[HoleFinder] Found " + std::to_string(loops.size()) + " loops. Sizes:";
-        for (int i = 0; i < (int)loops.size(); ++i)
-            msg += " [" + std::to_string(i) + "]=" + std::to_string(loops[i].size());
+        std::string msg = "[HoleFinder] Found " + std::to_string(loops.size()) + " loops:";
+        for (int i = 0; i < (int)loops.size(); ++i) {
+            auto [cx, cy] = loop_centroid_2d(loops[i]);
+            // Also compute 3D centroid for spatial identification
+            Vec3f c3d = Vec3f::Zero();
+            for (int vi : loops[i]) c3d += its.vertices[vi];
+            c3d /= (float)loops[i].size();
+            msg += " [" + std::to_string(i) + "]=" + std::to_string(loops[i].size()) + "verts";
+            msg += "(3d:" + std::to_string(c3d.x()) + "," + std::to_string(c3d.y()) + "," + std::to_string(c3d.z()) + ")";
+        }
         BOOST_LOG_TRIVIAL(warning) << msg;
     }
 
