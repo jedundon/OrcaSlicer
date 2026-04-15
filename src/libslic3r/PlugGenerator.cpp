@@ -16,7 +16,7 @@ namespace Slic3r {
 // Build a coordinate frame on the plane defined by `normal`.
 // Returns two orthonormal tangent vectors (u, v) such that (u, v, normal) is
 // a right-handed frame.
-static void build_plane_frame(const Vec3f &normal, Vec3f &u_out, Vec3f &v_out)
+void build_plane_frame(const Vec3f &normal, Vec3f &u_out, Vec3f &v_out)
 {
     // Pick a vector not parallel to normal.
     Vec3f arbitrary = (std::abs(normal.x()) < 0.9f) ? Vec3f(1, 0, 0) : Vec3f(0, 1, 0);
@@ -25,7 +25,7 @@ static void build_plane_frame(const Vec3f &normal, Vec3f &u_out, Vec3f &v_out)
 }
 
 // Project a 3D point onto a 2D plane coordinate system.
-static Vec2d project_to_2d(const Vec3f &point, const Vec3f &origin,
+Vec2d project_to_2d(const Vec3f &point, const Vec3f &origin,
                            const Vec3f &u, const Vec3f &v)
 {
     Vec3f rel = point - origin;
@@ -33,7 +33,7 @@ static Vec2d project_to_2d(const Vec3f &point, const Vec3f &origin,
 }
 
 // Unproject a 2D plane coordinate back to 3D.
-static Vec3f unproject_to_3d(const Vec2d &pt2d, const Vec3f &origin,
+Vec3f unproject_to_3d(const Vec2d &pt2d, const Vec3f &origin,
                              const Vec3f &u, const Vec3f &v)
 {
     return origin + (float)pt2d.x() * u + (float)pt2d.y() * v;
@@ -60,9 +60,11 @@ static void emit_side_wall_quads(
     float dz = std::abs(front_b.z() - front_a.z());
 
     // Number of subdivisions along this edge.
+    // Skip subdivision for near-horizontal edges — their diagonal's Z-shift
+    // is already negligible regardless of layer height.
     int n_sub = 1;
     if (dz > SIDE_WALL_Z_STEP)
-        n_sub = (int)std::ceil(dz / SIDE_WALL_Z_STEP);
+        n_sub = std::min((int)std::ceil(dz / SIDE_WALL_Z_STEP), 500);
 
     // We always emit new vertices for the intermediate strip endpoints.
     // The first point coincides with front_a, the last with front_b.
@@ -145,10 +147,10 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     }
 
     // ── Step 2: Triangulate the cap face ────────────────────────────────
-    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] ExPolygon contour: " << expoly.contour.points.size()
+    BOOST_LOG_TRIVIAL(debug) << "[PlugGen] ExPolygon contour: " << expoly.contour.points.size()
         << " pts, " << expoly.holes.size() << " holes";
     for (size_t hi = 0; hi < expoly.holes.size(); ++hi) {
-        BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Hole " << hi << ": "
+        BOOST_LOG_TRIVIAL(debug) << "[PlugGen] Hole " << hi << ": "
             << expoly.holes[hi].points.size() << " pts, area="
             << std::abs(expoly.holes[hi].area());
     }
@@ -157,7 +159,7 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     std::vector<Vec2d> tri_pts_2d = triangulate_expolygon_2d(expoly, NORMALS_UP);
     // tri_pts_2d contains groups of 3 points (triangle vertices).
     int num_cap_tris = (int)tri_pts_2d.size() / 3;
-    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Tessellation produced " << num_cap_tris << " triangles";
+    BOOST_LOG_TRIVIAL(debug) << "[PlugGen] Tessellation produced " << num_cap_tris << " triangles";
     if (num_cap_tris == 0)
         return TriangleMesh();
 
@@ -195,7 +197,7 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
         }
     }
 
-    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Side walls: " << total_side_tris
+    BOOST_LOG_TRIVIAL(debug) << "[PlugGen] Side walls: " << total_side_tris
         << " triangles (Z-step=" << SIDE_WALL_Z_STEP << "mm)";
 
     // ── 3d: Front cap triangles ──
@@ -328,7 +330,7 @@ TriangleMesh generate_island_negative(const std::vector<Vec3f> &inner_loop,
 
     its_merge_vertices(its);
 
-    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Island negative: " << n
+    BOOST_LOG_TRIVIAL(debug) << "[PlugGen] Island negative: " << n
         << " verts, depth=" << depth << ", eps=" << SURFACE_EPS;
 
     TriangleMesh mesh(std::move(its));

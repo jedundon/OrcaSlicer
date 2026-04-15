@@ -1525,6 +1525,10 @@ void GLGizmoMmuSegmentation::perform_hole_fill(const Vec2d &mouse_position)
     // Take an undo/redo snapshot before modifying the model.
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Hole fill color");
 
+    // IMPORTANT: Copy the source volume's transform BEFORE add_volume().
+    // add_volume() may reallocate mo->volumes, invalidating hit_volume.
+    const Geometry::Transformation source_trafo = hit_volume->get_transformation();
+
     // Add the plug as a new volume to the model object.
     ModelObject *mo_mut = wxGetApp().model().objects[object_idx];
     ModelVolume *new_vol = mo_mut->add_volume(std::move(plug), ModelVolumeType::MODEL_PART, false);
@@ -1536,7 +1540,7 @@ void GLGizmoMmuSegmentation::perform_hole_fill(const Vec2d &mouse_position)
 
     // Apply the same volume-level transform as the source volume so the plug
     // sits correctly in the object's coordinate space.
-    new_vol->set_transformation(hit_volume->get_transformation());
+    new_vol->set_transformation(source_trafo);
 
     // Add negative volumes for inner loops (islands) so the slicer's boolean
     // union doesn't fill the island area with the plug's extruder.
@@ -1553,7 +1557,7 @@ void GLGizmoMmuSegmentation::perform_hole_fill(const Vec2d &mouse_position)
         neg_vol->set_new_unique_id();
         neg_vol->name = "HoleFill_neg_" + std::to_string(hit_volume_raw_idx)
             + "_f" + std::to_string(facet_idx) + "_i" + std::to_string(il);
-        neg_vol->set_transformation(hit_volume->get_transformation());
+        neg_vol->set_transformation(source_trafo);
     }
 
     // Notify the system that the model changed.
@@ -1651,16 +1655,13 @@ void GLGizmoMmuSegmentation::render_hole_fill_hover()
                 // Rebuild fill GL model — translucent triangulated cap.
                 m_hover_fill_mesh.reset();
                 {
-                    // Use the same tessellation as PlugGenerator.
+                    // Use shared helpers from PlugGenerator.
                     Vec3f normal = m_hover_boundary.plane_normal.normalized();
                     Vec3f origin = m_hover_boundary.plane_origin;
                     Vec3f nudge = normal * 0.04f; // slightly less than outline offset
 
                     Vec3f u, v;
-                    // build_plane_frame inline (same as PlugGenerator).
-                    Vec3f arbitrary = (std::abs(normal.x()) < 0.9f) ? Vec3f(1, 0, 0) : Vec3f(0, 1, 0);
-                    u = normal.cross(arbitrary).normalized();
-                    v = normal.cross(u).normalized();
+                    build_plane_frame(normal, u, v);
 
                     const auto &loop = m_hover_boundary.loop;
                     int n = (int)loop.size();
@@ -1668,8 +1669,7 @@ void GLGizmoMmuSegmentation::render_hole_fill_hover()
                     Polygon poly_2d;
                     poly_2d.points.reserve(n);
                     for (int i = 0; i < n; ++i) {
-                        Vec3f rel = loop[i] - origin;
-                        Vec2d p((double)rel.dot(u), (double)rel.dot(v));
+                        Vec2d p = project_to_2d(loop[i], origin, u, v);
                         poly_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
                     }
                     if (poly_2d.is_clockwise())
@@ -1681,8 +1681,7 @@ void GLGizmoMmuSegmentation::render_hole_fill_hover()
                         Polygon hole_2d;
                         hole_2d.points.reserve(inner.size());
                         for (const Vec3f &pt : inner) {
-                            Vec3f rel = pt - origin;
-                            Vec2d p((double)rel.dot(u), (double)rel.dot(v));
+                            Vec2d p = project_to_2d(pt, origin, u, v);
                             hole_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
                         }
                         if (hole_2d.is_counter_clockwise())
@@ -1707,7 +1706,7 @@ void GLGizmoMmuSegmentation::render_hole_fill_hover()
                         init_data.reserve_indices(num_tris * 3);
 
                         for (const Vec2d &p : tri_pts_2d) {
-                            Vec3f pt3d = origin + (float)p.x() * u + (float)p.y() * v + nudge;
+                            Vec3f pt3d = unproject_to_3d(p, origin, u, v) + nudge;
                             init_data.add_vertex(pt3d);
                         }
                         for (int t = 0; t < num_tris; ++t) {

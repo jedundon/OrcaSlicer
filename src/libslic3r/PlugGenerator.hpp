@@ -46,6 +46,20 @@ TriangleMesh generate_island_negative(const std::vector<Vec3f> &inner_loop,
                                       const Vec3f &plane_origin,
                                       float depth = PLUG_DEFAULT_DEPTH_MM);
 
+// ─── shared geometry helpers (used by PlugGenerator and hover preview) ────────
+
+// Build a right-handed coordinate frame (u, v) on the plane defined by `normal`.
+// Guarantees: u × v == normal (approximately), |u| == |v| == 1.
+void build_plane_frame(const Vec3f &normal, Vec3f &u_out, Vec3f &v_out);
+
+// Project a 3D point onto a 2D plane coordinate system defined by (origin, u, v).
+Vec2d project_to_2d(const Vec3f &point, const Vec3f &origin,
+                    const Vec3f &u, const Vec3f &v);
+
+// Unproject a 2D plane coordinate back to 3D.
+Vec3f unproject_to_3d(const Vec2d &pt2d, const Vec3f &origin,
+                      const Vec3f &u, const Vec3f &v);
+
 } // namespace Slic3r
 
 #endif // slic3r_PlugGenerator_hpp_

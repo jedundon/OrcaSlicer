@@ -115,7 +115,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
     if (boundary_edges.empty())
         return result;
 
-    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Seed facet " << seed_facet_idx
+    BOOST_LOG_TRIVIAL(debug) << "[HoleFinder] Seed facet " << seed_facet_idx
         << ", normal=(" << seed_normal.x() << "," << seed_normal.y() << "," << seed_normal.z() << ")"
         << ", region has " << (int)std::count(in_region.begin(), in_region.end(), true)
         << " faces, " << (int)boundary_edges.size() << " boundary edges";
@@ -173,7 +173,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
             msg += " [" + std::to_string(i) + "]=" + std::to_string(loops[i].size()) + "verts";
             msg += "(3d:" + std::to_string(c3d.x()) + "," + std::to_string(c3d.y()) + "," + std::to_string(c3d.z()) + ")";
         }
-        BOOST_LOG_TRIVIAL(warning) << msg;
+        BOOST_LOG_TRIVIAL(debug) << msg;
     }
 
     // Step 5: Classify loops.
@@ -211,13 +211,13 @@ std::vector<HoleBoundary> find_hole_boundaries(
     float max_abs_area = 0.f;
     for (int i = 0; i < (int)loops.size(); ++i) {
         float a = std::abs(signed_area_2d(loops[i]));
-        BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Loop " << i << ": abs_area=" << a << ", verts=" << (int)loops[i].size();
+        BOOST_LOG_TRIVIAL(debug) << "[HoleFinder] Loop " << i << ": abs_area=" << a << ", verts=" << (int)loops[i].size();
         if (a > max_abs_area) {
             max_abs_area = a;
             perimeter_idx = i;
         }
     }
-    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Perimeter = loop " << perimeter_idx << " (area " << max_abs_area << ")";
+    BOOST_LOG_TRIVIAL(debug) << "[HoleFinder] Perimeter = loop " << perimeter_idx << " (area " << max_abs_area << ")";
 
     // Step 6: Classify non-perimeter loops using nesting depth.
     //
@@ -294,7 +294,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
         std::string msg = "[HoleFinder] Nesting depths:";
         for (int i = 0; i < num_loops; ++i)
             msg += " [" + std::to_string(i) + "]=" + std::to_string(nesting_depth[i]);
-        BOOST_LOG_TRIVIAL(warning) << msg;
+        BOOST_LOG_TRIVIAL(debug) << msg;
     }
 
     // Odd depth = hole, even depth (>0) = island.
@@ -317,11 +317,11 @@ std::vector<HoleBoundary> find_hole_boundaries(
             island_loops.push_back({i, nesting_depth[i]});
     }
 
-    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Classification: " << hole_loops.size() << " holes, " << island_loops.size() << " islands";
+    BOOST_LOG_TRIVIAL(debug) << "[HoleFinder] Classification: " << hole_loops.size() << " holes, " << island_loops.size() << " islands";
     for (const auto &hl : hole_loops)
-        BOOST_LOG_TRIVIAL(warning) << "  Hole: loop " << hl.loop_idx << " (depth " << hl.depth << ", verts " << loops[hl.loop_idx].size() << ")";
+        BOOST_LOG_TRIVIAL(debug) << "  Hole: loop " << hl.loop_idx << " (depth " << hl.depth << ", verts " << loops[hl.loop_idx].size() << ")";
     for (const auto &il : island_loops)
-        BOOST_LOG_TRIVIAL(warning) << "  Island: loop " << il.loop_idx << " (depth " << il.depth << ", verts " << loops[il.loop_idx].size() << ")";
+        BOOST_LOG_TRIVIAL(debug) << "  Island: loop " << il.loop_idx << " (depth " << il.depth << ", verts " << loops[il.loop_idx].size() << ")";
 
     // Build HoleBoundary for each hole loop.
     // Map loop_idx -> index in result for parent lookup.
@@ -544,7 +544,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
                     result[hi].inner_loops.push_back(std::move(inner));
                     islands_found++;
 
-                    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Found disconnected island ("
+                    BOOST_LOG_TRIVIAL(debug) << "[HoleFinder] Found disconnected island ("
                         << island_faces.size() << " faces, " << isl_verts.size()
                         << " verts, plane_d=" << face_d
                         << ", centroid_2d=(" << icx << "," << icy << ")"
@@ -554,7 +554,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
             }
         }
 
-        BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Step 7: scanned "
+        BOOST_LOG_TRIVIAL(debug) << "[HoleFinder] Step 7: scanned "
             << regions_scanned << " coplanar regions, found "
             << islands_found << " disconnected islands"
             << " (main_plane_d=" << main_plane_d
