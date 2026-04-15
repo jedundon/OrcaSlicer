@@ -259,13 +259,32 @@ std::vector<HoleBoundary> find_hole_boundaries(
     };
 
     // Compute nesting depth for each loop.
+    // The perimeter (largest area) is always depth 0 by definition.
+    // For non-perimeter loops, we count how many OTHER non-perimeter loops
+    // contain them (via point-in-polygon). The perimeter is excluded from
+    // containment tests because complex perimeter shapes (e.g., faces with
+    // letter-channel cutouts) create non-convex polygons where point-in-polygon
+    // gives false positives.
+    //
+    // Depth relative to perimeter:
+    //   perimeter = 0
+    //   direct children of perimeter = 1 (holes)
+    //   children of holes = 2 (islands)
+    //   etc.
     int num_loops = (int)loops.size();
     std::vector<int> nesting_depth(num_loops, 0);
 
+    // Perimeter is depth 0.
+    nesting_depth[perimeter_idx] = 0;
+
+    // All non-perimeter loops start at depth 1 (inside the perimeter).
+    // Then count containment by other non-perimeter loops.
     for (int i = 0; i < num_loops; ++i) {
+        if (i == perimeter_idx) continue;
+        nesting_depth[i] = 1; // Inside the perimeter
         auto [cx, cy] = loop_centroid_2d(loops[i]);
         for (int j = 0; j < num_loops; ++j) {
-            if (i == j) continue;
+            if (j == i || j == perimeter_idx) continue;
             if (point_in_loop_2d(cx, cy, loops[j]))
                 nesting_depth[i]++;
         }
@@ -276,13 +295,6 @@ std::vector<HoleBoundary> find_hole_boundaries(
         for (int i = 0; i < num_loops; ++i)
             msg += " [" + std::to_string(i) + "]=" + std::to_string(nesting_depth[i]);
         BOOST_LOG_TRIVIAL(warning) << msg;
-    }
-    // Sanity check: perimeter should be depth 0 (not contained by anything).
-    // If it's not, our perimeter detection was wrong; bail out.
-    if (nesting_depth[perimeter_idx] != 0) {
-        BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] ERROR: perimeter loop " << perimeter_idx
-            << " has depth " << nesting_depth[perimeter_idx] << " (expected 0). Bailing out.";
-        return result;
     }
 
     // Odd depth = hole, even depth (>0) = island.
