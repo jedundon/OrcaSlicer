@@ -2,6 +2,7 @@
 #define slic3r_GLGizmoMmuSegmentation_hpp_
 
 #include "GLGizmoPainterBase.hpp"
+#include "libslic3r/HoleFinder.hpp"
 
 namespace Slic3r::GUI {
 
@@ -157,6 +158,15 @@ private:
 
     // Hole Fill methods
     void perform_hole_fill(const Vec2d &mouse_position);
+    void render_hole_fill_hover();
+
+    // Hole Fill hover preview state
+    int                               m_hover_facet = -1;     // facet index of last hover detection
+    int                               m_hover_mesh_id = -1;   // mesh_id of last hover detection
+    bool                              m_hover_hole_valid = false;
+    HoleBoundary                      m_hover_boundary;       // cached detected boundary
+    GLModel                           m_hover_outline_mesh;   // GL line loop for boundary outline
+    GLModel                           m_hover_fill_mesh;      // GL triangles for translucent fill
 
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.

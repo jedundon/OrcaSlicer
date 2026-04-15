@@ -14,6 +14,9 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/HoleFinder.hpp"
 #include "libslic3r/PlugGenerator.hpp"
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Tesselate.hpp"
+#include "slic3r/GUI/OpenGLManager.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
 
@@ -45,6 +48,13 @@ void GLGizmoMmuSegmentation::on_shutdown()
 {
     m_parent.use_slope(false);
     m_parent.toggle_model_objects_visibility(true);
+
+    // Clean up hole fill hover state.
+    m_hover_hole_valid = false;
+    m_hover_facet = -1;
+    m_hover_mesh_id = -1;
+    m_hover_outline_mesh.reset();
+    m_hover_fill_mesh.reset();
 }
 
 std::string GLGizmoMmuSegmentation::on_get_name() const
@@ -170,7 +180,12 @@ void GLGizmoMmuSegmentation::render_painter_gizmo()
 
     m_c->object_clipper()->render_cut();
     m_c->instances_hider()->render_cut();
-    render_cursor();
+
+    // In Hole Fill mode, show hole boundary preview instead of brush cursor.
+    if (m_current_tool == HoleFillToolIcon)
+        render_hole_fill_hover();
+    else
+        render_cursor();
 
     glsafe(::glDisable(GL_BLEND));
 }
@@ -1531,6 +1546,208 @@ void GLGizmoMmuSegmentation::perform_hole_fill(const Vec2d &mouse_position)
         NotificationType::CustomNotification,
         NotificationManager::NotificationLevel::RegularNotificationLevel,
         _u8L("Hole filled successfully! A new volume has been added with the selected filament."));
+}
+
+void GLGizmoMmuSegmentation::render_hole_fill_hover()
+{
+    // Use the raycast result maintained by the base class.
+    if (m_rr.mesh_id < 0) {
+        m_hover_hole_valid = false;
+        return;
+    }
+
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    if (!mo) return;
+
+    const Selection &selection = m_parent.get_selection();
+
+    // Map m_rr.mesh_id (model-part index) to actual ModelVolume.
+    int model_part_idx = 0;
+    const ModelVolume *hit_volume = nullptr;
+    for (int vi = 0; vi < (int)mo->volumes.size(); ++vi) {
+        if (!mo->volumes[vi]->is_model_part())
+            continue;
+        if (model_part_idx == m_rr.mesh_id) {
+            hit_volume = mo->volumes[vi];
+            break;
+        }
+        ++model_part_idx;
+    }
+    if (!hit_volume) {
+        m_hover_hole_valid = false;
+        return;
+    }
+
+    int facet_idx = (int)m_rr.facet;
+
+    // Only recompute if the hover target changed.
+    if (facet_idx != m_hover_facet || m_rr.mesh_id != m_hover_mesh_id) {
+        m_hover_facet = facet_idx;
+        m_hover_mesh_id = m_rr.mesh_id;
+        m_hover_hole_valid = false;
+
+        const indexed_triangle_set &its = hit_volume->mesh().its;
+        if (!its.indices.empty()) {
+            HoleBoundary boundary;
+            bool found = find_nearest_hole(its, facet_idx, m_rr.hit, boundary, m_hole_fill_angle_tolerance);
+            if (found && boundary.loop.size() >= 3) {
+                m_hover_boundary = std::move(boundary);
+                m_hover_hole_valid = true;
+
+                // Rebuild outline GL model — line segments for boundary loop.
+                m_hover_outline_mesh.reset();
+                {
+                    GLModel::Geometry init_data;
+                    init_data.format = {GLModel::Geometry::EPrimitiveType::Lines,
+                                        GLModel::Geometry::EVertexLayout::P3};
+                    init_data.color = ColorRGBA(0.0f, 1.0f, 0.3f, 1.0f); // bright green
+
+                    const auto &loop = m_hover_boundary.loop;
+                    int n = (int)loop.size();
+                    init_data.reserve_vertices(n);
+                    init_data.reserve_indices(n * 2);
+
+                    // Offset vertices slightly along the normal so the outline
+                    // renders above the surface (avoids z-fighting).
+                    Vec3f nudge = m_hover_boundary.plane_normal.normalized() * 0.05f;
+                    for (int i = 0; i < n; ++i)
+                        init_data.add_vertex(loop[i] + nudge);
+
+                    for (int i = 0; i < n; ++i) {
+                        init_data.add_line((unsigned int)i, (unsigned int)((i + 1) % n));
+                    }
+
+                    // Also add inner loop outlines.
+                    for (const auto &inner : m_hover_boundary.inner_loops) {
+                        int base = (int)init_data.vertices_count();
+                        int in_n = (int)inner.size();
+                        for (int i = 0; i < in_n; ++i)
+                            init_data.add_vertex(inner[i] + nudge);
+                        for (int i = 0; i < in_n; ++i)
+                            init_data.add_line((unsigned int)(base + i), (unsigned int)(base + (i + 1) % in_n));
+                    }
+
+                    m_hover_outline_mesh.init_from(std::move(init_data));
+                }
+
+                // Rebuild fill GL model — translucent triangulated cap.
+                m_hover_fill_mesh.reset();
+                {
+                    // Use the same tessellation as PlugGenerator.
+                    Vec3f normal = m_hover_boundary.plane_normal.normalized();
+                    Vec3f origin = m_hover_boundary.plane_origin;
+                    Vec3f nudge = normal * 0.04f; // slightly less than outline offset
+
+                    Vec3f u, v;
+                    // build_plane_frame inline (same as PlugGenerator).
+                    Vec3f arbitrary = (std::abs(normal.x()) < 0.9f) ? Vec3f(1, 0, 0) : Vec3f(0, 1, 0);
+                    u = normal.cross(arbitrary).normalized();
+                    v = normal.cross(u).normalized();
+
+                    const auto &loop = m_hover_boundary.loop;
+                    int n = (int)loop.size();
+
+                    Polygon poly_2d;
+                    poly_2d.points.reserve(n);
+                    for (int i = 0; i < n; ++i) {
+                        Vec3f rel = loop[i] - origin;
+                        Vec2d p((double)rel.dot(u), (double)rel.dot(v));
+                        poly_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
+                    }
+                    if (poly_2d.is_clockwise())
+                        poly_2d.reverse();
+
+                    ExPolygon expoly;
+                    expoly.contour = std::move(poly_2d);
+                    for (const auto &inner : m_hover_boundary.inner_loops) {
+                        Polygon hole_2d;
+                        hole_2d.points.reserve(inner.size());
+                        for (const Vec3f &pt : inner) {
+                            Vec3f rel = pt - origin;
+                            Vec2d p((double)rel.dot(u), (double)rel.dot(v));
+                            hole_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
+                        }
+                        if (hole_2d.is_counter_clockwise())
+                            hole_2d.reverse();
+                        expoly.holes.push_back(std::move(hole_2d));
+                    }
+
+                    std::vector<Vec2d> tri_pts_2d = triangulate_expolygon_2d(expoly, NORMALS_UP);
+                    int num_tris = (int)tri_pts_2d.size() / 3;
+                    if (num_tris > 0) {
+                        GLModel::Geometry init_data;
+                        init_data.format = {GLModel::Geometry::EPrimitiveType::Triangles,
+                                            GLModel::Geometry::EVertexLayout::P3};
+                        // Selected filament color with transparency.
+                        ColorRGBA fill_color = m_extruders_colors.empty()
+                            ? ColorRGBA(1.0f, 0.5f, 0.8f, 0.35f)
+                            : m_extruders_colors[m_selected_extruder_idx % m_extruders_colors.size()];
+                        fill_color.a(0.35f);
+                        init_data.color = fill_color;
+
+                        init_data.reserve_vertices(num_tris * 3);
+                        init_data.reserve_indices(num_tris * 3);
+
+                        for (const Vec2d &p : tri_pts_2d) {
+                            Vec3f pt3d = origin + (float)p.x() * u + (float)p.y() * v + nudge;
+                            init_data.add_vertex(pt3d);
+                        }
+                        for (int t = 0; t < num_tris; ++t) {
+                            unsigned int base = (unsigned int)(t * 3);
+                            init_data.add_triangle(base, base + 1, base + 2);
+                        }
+
+                        m_hover_fill_mesh.init_from(std::move(init_data));
+                    }
+                }
+            }
+        }
+    }
+
+    if (!m_hover_hole_valid)
+        return;
+
+    // Get the volume transform to render in world space.
+    const ModelInstance *mi = mo->instances[selection.get_instance_idx()];
+    Transform3d model_trafo = mi->get_transformation().get_matrix() * hit_volume->get_matrix();
+    const Camera &camera = wxGetApp().plater()->get_camera();
+    Transform3d view_model_matrix = camera.get_view_matrix() * model_trafo;
+
+    // Render the translucent fill.
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glDepthMask(GL_FALSE));
+
+    auto shader_fill = wxGetApp().get_shader("flat");
+    if (shader_fill) {
+        shader_fill->start_using();
+        shader_fill->set_uniform("view_model_matrix", view_model_matrix);
+        shader_fill->set_uniform("projection_matrix", camera.get_projection_matrix());
+        m_hover_fill_mesh.render();
+        shader_fill->stop_using();
+    }
+
+    glsafe(::glDepthMask(GL_TRUE));
+
+    // Render the outline on top.
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glLineWidth(2.5f));
+#endif
+
+    auto shader_line = wxGetApp().get_shader("flat");
+    if (shader_line) {
+        shader_line->start_using();
+        shader_line->set_uniform("view_model_matrix", view_model_matrix);
+        shader_line->set_uniform("projection_matrix", camera.get_projection_matrix());
+        m_hover_outline_mesh.render();
+        shader_line->stop_using();
+    }
+
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glLineWidth(1.0f));
+#endif
 }
 
 } // namespace Slic3r
