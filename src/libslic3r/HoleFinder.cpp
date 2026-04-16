@@ -258,6 +258,45 @@ std::vector<HoleBoundary> find_hole_boundaries(
         return {cx / nv, cy / nv};
     };
 
+    // Helper: find a point guaranteed to be inside a simple polygon.
+    // Uses the "lowest vertex" trick: find the vertex with the minimum axis1
+    // coordinate (breaking ties by maximum axis0). The interior of the polygon
+    // is above this vertex, so the midpoint of the triangle formed by the
+    // previous, current, and next vertices is guaranteed interior for a simple
+    // (non-self-intersecting) polygon.
+    auto interior_point_2d = [&](const std::vector<int> &verts) -> std::pair<float, float> {
+        int nv = (int)verts.size();
+        if (nv < 3) return loop_centroid_2d(verts);
+
+        // Find the vertex with minimum axis1 (lowest), break ties with max axis0.
+        int best = 0;
+        float best_y = its.vertices[verts[0]][axis1];
+        float best_x = its.vertices[verts[0]][axis0];
+        for (int i = 1; i < nv; ++i) {
+            float y = its.vertices[verts[i]][axis1];
+            float x = its.vertices[verts[i]][axis0];
+            if (y < best_y || (y == best_y && x > best_x)) {
+                best = i;
+                best_y = y;
+                best_x = x;
+            }
+        }
+
+        int prev = (best - 1 + nv) % nv;
+        int next = (best + 1) % nv;
+        float px = its.vertices[verts[prev]][axis0];
+        float py = its.vertices[verts[prev]][axis1];
+        float cx = its.vertices[verts[best]][axis0];
+        float cy = its.vertices[verts[best]][axis1];
+        float nx = its.vertices[verts[next]][axis0];
+        float ny = its.vertices[verts[next]][axis1];
+
+        // Centroid of the triangle (prev, best, next) — guaranteed interior
+        // for a simple polygon at a convex vertex (and the lowest vertex is
+        // always convex on the polygon's convex hull).
+        return {(px + cx + nx) / 3.f, (py + cy + ny) / 3.f};
+    };
+
     // Compute nesting depth for each loop.
     // The perimeter (largest area) is always depth 0 by definition.
     // For non-perimeter loops, we count how many OTHER non-perimeter loops
@@ -282,7 +321,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
     for (int i = 0; i < num_loops; ++i) {
         if (i == perimeter_idx) continue;
         nesting_depth[i] = 1; // Inside the perimeter
-        auto [cx, cy] = loop_centroid_2d(loops[i]);
+        auto [cx, cy] = interior_point_2d(loops[i]);
         for (int j = 0; j < num_loops; ++j) {
             if (j == i || j == perimeter_idx) continue;
             if (point_in_loop_2d(cx, cy, loops[j]))
@@ -347,7 +386,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
     // Assign each island to its parent hole (the odd-depth loop at depth-1
     // that contains it).
     for (const auto &il : island_loops) {
-        auto [cx, cy] = loop_centroid_2d(loops[il.loop_idx]);
+        auto [cx, cy] = interior_point_2d(loops[il.loop_idx]);
         int target_depth = il.depth - 1; // The hole that directly contains this island
 
         for (const auto &hl : hole_loops) {
@@ -504,15 +543,45 @@ std::vector<HoleBoundary> find_hole_boundaries(
                 }
             }
 
-            // Compute 2D centroid of this island's outer loop.
+            // Compute a guaranteed-interior point for this island's outer loop.
             const auto &isl_verts = isl_loops[best_loop];
-            float icx = 0.f, icy = 0.f;
-            for (int vi : isl_verts) {
-                icx += its.vertices[vi][axis0];
-                icy += its.vertices[vi][axis1];
+            float icx, icy;
+            {
+                int nv = (int)isl_verts.size();
+                if (nv >= 3) {
+                    // Find the vertex with minimum axis1 (lowest); the triangle
+                    // formed with its neighbors has a centroid guaranteed interior.
+                    int best_v = 0;
+                    float by = its.vertices[isl_verts[0]][axis1];
+                    float bx = its.vertices[isl_verts[0]][axis0];
+                    for (int i = 1; i < nv; ++i) {
+                        float y = its.vertices[isl_verts[i]][axis1];
+                        float x = its.vertices[isl_verts[i]][axis0];
+                        if (y < by || (y == by && x > bx)) {
+                            best_v = i;
+                            by = y;
+                            bx = x;
+                        }
+                    }
+                    int pv = (best_v - 1 + nv) % nv;
+                    int nxt = (best_v + 1) % nv;
+                    icx = (its.vertices[isl_verts[pv]][axis0] +
+                           its.vertices[isl_verts[best_v]][axis0] +
+                           its.vertices[isl_verts[nxt]][axis0]) / 3.f;
+                    icy = (its.vertices[isl_verts[pv]][axis1] +
+                           its.vertices[isl_verts[best_v]][axis1] +
+                           its.vertices[isl_verts[nxt]][axis1]) / 3.f;
+                } else {
+                    // Degenerate — fall back to centroid.
+                    icx = 0.f; icy = 0.f;
+                    for (int vi : isl_verts) {
+                        icx += its.vertices[vi][axis0];
+                        icy += its.vertices[vi][axis1];
+                    }
+                    icx /= (float)nv;
+                    icy /= (float)nv;
+                }
             }
-            icx /= (float)isl_verts.size();
-            icy /= (float)isl_verts.size();
 
             // Check if this island falls inside any of our detected holes.
             for (int hi = 0; hi < (int)result.size(); ++hi) {

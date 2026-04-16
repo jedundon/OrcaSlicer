@@ -15,6 +15,7 @@ Branch: `feature/hole-fill-color` on `https://github.com/jedundon/OrcaSlicer`
 
 ### HF-01: No guard against duplicate hole fills ⬜
 Clicking the same hole twice creates two overlapping HoleFill volumes. Should check for existing volumes with similar name/position before adding.
+- **Decision:** Option (b) — skip + show notification "This hole is already filled". No replace logic to keep bug surface small.
 - **File:** `GLGizmoMmuSegmentation.cpp` → `perform_hole_fill()`
 - **Severity:** Low — user-visible but non-destructive (can Undo)
 
@@ -35,6 +36,7 @@ Plug vertices are in volume-local space, transform copies source volume. Reviewe
 
 ### HF-05: Gizmo reinit after adding volume ⬜
 `m_triangle_selectors` may be stale after adding a HoleFill volume. Could cause crashes or wrong painting if user continues without re-entering the gizmo.
+- **Decision:** Document as known limitation for now ("re-enter gizmo after filling"). Long-term fix is HF-30 (separate gizmo).
 - **File:** `GLGizmoMmuSegmentation.cpp`
 - **Severity:** Medium
 
@@ -47,15 +49,18 @@ Centroid of a non-convex polygon (C, S, crescent shapes) can lie outside the pol
 - **Fix:** Use bounding-box center, or sample multiple points with majority vote.
 - **File:** `HoleFinder.cpp`
 
-### HF-11: `its_face_neighbors` recomputed on every hover ⬜
+### HF-11: `its_face_neighbors` recomputed on every hover ⬜ 🔴 HIGH PRIORITY (when needed)
 O(n) operation over all faces, called fresh on every facet change. For high-poly models (100k+ faces) this could cause hover lag.
 - **Fix:** Cache neighbor table per mesh (invalidate on mesh change).
 - **File:** `HoleFinder.cpp` + `GLGizmoMmuSegmentation.cpp`
+- **Deferred:** 2026-04-16. Fine on current test models (~1200 faces). Revisit when testing on 50k+ face models.
+- **See also:** HF-12 (same root cause — combined they make hover O(n) per facet change)
 
-### HF-12: Step 7 scans ALL mesh faces on every hover ⬜
+### HF-12: Step 7 scans ALL mesh faces on every hover ⬜ 🔴 HIGH PRIORITY (when needed)
 Disconnected island detection iterates every face in the mesh. Combined with HF-11, this is O(n) per facet change. Fine for ~1200 faces, could lag on complex models.
-- **Fix:** Cache Step 7 results, or limit scan to faces within bounding box of detected holes.
-- **File:** `HoleFinder.cpp`
+- **Fix:** Cache `find_hole_boundaries()` results keyed by `(mesh_id, seed_facet_idx)`. Results are stable unless mesh changes. Invalidate on volume add/remove.
+- **File:** `HoleFinder.cpp` + `GLGizmoMmuSegmentation.cpp`
+- **Deferred:** 2026-04-16. Adds complexity that could mask bugs during correctness iteration.
 
 ### HF-13: E letter (open channels) cannot be detected ⬜
 Letters whose strokes are open channels connected to the face perimeter have no enclosed boundary loops. The boundary-loop approach fundamentally can't detect these.
@@ -78,17 +83,17 @@ If a loop has zero area (degenerate triangle strip), it could cause division-by-
 Very small holes (< 1 mm²) are detected and offered for fill. A configurable minimum area threshold would improve UX by filtering noise.
 - **File:** `HoleFinder.cpp`
 
-### HF-21: Debug logging at `warning` level — should be `debug`/`trace` ⬜
-All `[HoleFinder]` log lines use `BOOST_LOG_TRIVIAL(warning)`, which spams user log files in production. Switch to `debug` or `trace` before release.
-- **File:** `HoleFinder.cpp`
+### HF-21: Debug logging at `warning` level — should be `debug`/`trace` ✅ `f80654bc`
+All `[HoleFinder]` and `[PlugGen]` log lines switched from `warning` → `debug`.
+- **File:** `HoleFinder.cpp`, `PlugGenerator.cpp`
 
-### HF-22: `build_plane_frame` duplicated ⬜
-Identical function exists in both `PlugGenerator.cpp` and `render_hole_fill_hover()`. Extract to shared utility.
-- **Files:** `PlugGenerator.cpp`, `GLGizmoMmuSegmentation.cpp`
+### HF-22: `build_plane_frame` duplicated ✅ `f80654bc`
+Extracted to public API in `PlugGenerator.hpp`. Hover renderer now calls shared helper.
+- **Files:** `PlugGenerator.cpp`, `PlugGenerator.hpp`, `GLGizmoMmuSegmentation.cpp`
 
-### HF-23: ExPolygon tessellation code duplicated ⬜
-Boundary → ExPolygon → triangulate logic duplicated between PlugGenerator and hover renderer. Extract `boundary_to_expolygon(boundary, origin, u, v)` helper.
-- **Files:** `PlugGenerator.cpp`, `GLGizmoMmuSegmentation.cpp`
+### HF-23: ExPolygon tessellation code duplicated — partially done ✅ `f80654bc`
+`project_to_2d()` and `unproject_to_3d()` extracted to shared header. Full `boundary_to_expolygon()` helper still TODO.
+- **Files:** `PlugGenerator.cpp`, `PlugGenerator.hpp`, `GLGizmoMmuSegmentation.cpp`
 
 ### HF-24: Tool button icon is placeholder ⬜
 PUA codepoint `0xF0FF` renders as `?`. Need to create a proper SVG icon for the Hole Fill tool.
@@ -124,4 +129,22 @@ Vec3f cast fix for `add_vertex()` calls.
 
 ---
 
-*Last updated: 2026-04-15 05:39 UTC*
+---
+
+## 🏗️ Architecture / Future
+
+### HF-30: Extract Hole Fill into a separate gizmo ⬜ 🔴 HIGH PRIORITY
+Hole filling is fundamentally a **modeling operation** (creates real ModelVolumes), not a painting operation (assigns extruders to existing triangles). Housing it inside the MMU painting gizmo causes:
+- Stale triangle selectors after volume add (HF-05)
+- Tangled undo between paint strokes and volume additions
+- Confusing UX (filled volumes appear in object list as real parts, but come from a "painting" tool)
+- Shared state conflicts blocking further improvements
+
+Extracting to a dedicated gizmo (own toolbar icon, own render loop, own lifecycle) resolves all of these.
+- **Blocks:** HF-05 proper fix, HF-01 replace option, clean undo/redo
+- **Depends on:** Core feature being proven and stable first
+- **Decision date:** 2026-04-16, agreed with James
+
+---
+
+*Last updated: 2026-04-16 04:54 UTC*
