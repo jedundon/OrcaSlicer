@@ -1522,6 +1522,30 @@ void GLGizmoMmuSegmentation::perform_hole_fill(const Vec2d &mouse_position)
         return;
     }
 
+    // CR-7: Duplicate fill guard.
+    // Check if a HoleFill volume already exists for this hole by comparing
+    // bounding box centers. Two plugs targeting the same hole will have
+    // nearly identical bounding box centers regardless of which facet was
+    // clicked to trigger them.
+    {
+        const auto plug_center = plug.bounding_box().center();
+        const float dup_threshold = 0.1f; // 100 µm — same hole won't shift more than this
+        for (const ModelVolume *vol : mo->volumes) {
+            if (vol->name.rfind("HoleFill_", 0) != 0)
+                continue;
+            if (vol->name.rfind("HoleFill_neg_", 0) == 0)
+                continue; // Skip negative volumes
+            const auto existing_center = vol->mesh().bounding_box().center();
+            if ((plug_center.cast<double>() - existing_center.cast<double>()).norm() < dup_threshold) {
+                wxGetApp().plater()->get_notification_manager()->push_notification(
+                    NotificationType::CustomNotification,
+                    NotificationManager::NotificationLevel::RegularNotificationLevel,
+                    _u8L("This hole is already filled. Remove the existing HoleFill volume from the object list to refill."));
+                return;
+            }
+        }
+    }
+
     // Take an undo/redo snapshot before modifying the model.
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Hole fill color");
 

@@ -13,11 +13,10 @@ Branch: `feature/hole-fill-color` on `https://github.com/jedundon/OrcaSlicer`
 
 ## 🔴 Bugs / Correctness
 
-### HF-01: No guard against duplicate hole fills ⬜
-Clicking the same hole twice creates two overlapping HoleFill volumes. Should check for existing volumes with similar name/position before adding.
-- **Decision:** Option (b) — skip + show notification "This hole is already filled". No replace logic to keep bug surface small.
+### HF-01: No guard against duplicate hole fills ✅ `(pending commit)`
+Clicking the same hole twice creates two overlapping HoleFill volumes.
+- **Fix:** Bounding-box-center comparison (100µm threshold) before adding. Shows notification "This hole is already filled" and skips. User can remove existing volume from object list to refill.
 - **File:** `GLGizmoMmuSegmentation.cpp` → `perform_hole_fill()`
-- **Severity:** Low — user-visible but non-destructive (can Undo)
 
 ### HF-02: Stale `hit_volume` pointer in render_hole_fill_hover ⬜
 If `mo->volumes` changes between frames (e.g., user adds/deletes a HoleFill volume while hovering), the cached `m_hover_mesh_id` could point to the wrong volume. Low probability race.
