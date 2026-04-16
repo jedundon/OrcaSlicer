@@ -1513,6 +1513,10 @@ void GLGizmoMmuSegmentation::perform_hole_fill(const Vec2d &mouse_position)
     }
 
     // Generate the plug mesh.
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] Boundary: loop=" << boundary.loop.size()
+        << " pts, inner_loops=" << boundary.inner_loops.size()
+        << ", normal=(" << boundary.plane_normal.x() << "," << boundary.plane_normal.y()
+        << "," << boundary.plane_normal.z() << ")";
     TriangleMesh plug = generate_plug(boundary, m_hole_fill_depth);
     if (plug.empty()) {
         wxGetApp().plater()->get_notification_manager()->push_notification(

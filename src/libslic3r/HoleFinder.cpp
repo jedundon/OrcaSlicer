@@ -356,7 +356,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
             island_loops.push_back({i, nesting_depth[i]});
     }
 
-    BOOST_LOG_TRIVIAL(debug) << "[HoleFinder] Classification: " << hole_loops.size() << " holes, " << island_loops.size() << " islands";
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Classification: " << hole_loops.size() << " holes, " << island_loops.size() << " islands";
     for (const auto &hl : hole_loops)
         BOOST_LOG_TRIVIAL(debug) << "  Hole: loop " << hl.loop_idx << " (depth " << hl.depth << ", verts " << loops[hl.loop_idx].size() << ")";
     for (const auto &il : island_loops)
@@ -613,7 +613,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
                     result[hi].inner_loops.push_back(std::move(inner));
                     islands_found++;
 
-                    BOOST_LOG_TRIVIAL(debug) << "[HoleFinder] Found disconnected island ("
+                    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Found disconnected island ("
                         << island_faces.size() << " faces, " << isl_verts.size()
                         << " verts, plane_d=" << face_d
                         << ", centroid_2d=(" << icx << "," << icy << ")"
