@@ -147,10 +147,10 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     }
 
     // ── Step 2: Triangulate the cap face ────────────────────────────────
-    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] ExPolygon contour: " << expoly.contour.points.size()
+    BOOST_LOG_TRIVIAL(debug) << "[PlugGen] ExPolygon contour: " << expoly.contour.points.size()
         << " pts, " << expoly.holes.size() << " holes";
     for (size_t hi = 0; hi < expoly.holes.size(); ++hi) {
-        BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Hole " << hi << ": "
+        BOOST_LOG_TRIVIAL(debug) << "[PlugGen] Hole " << hi << ": "
             << expoly.holes[hi].points.size() << " pts, area="
             << std::abs(expoly.holes[hi].area());
     }
@@ -159,7 +159,7 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     std::vector<Vec2d> tri_pts_2d = triangulate_expolygon_2d(expoly, NORMALS_UP);
     // tri_pts_2d contains groups of 3 points (triangle vertices).
     int num_cap_tris = (int)tri_pts_2d.size() / 3;
-    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Tessellation produced " << num_cap_tris << " triangles";
+    BOOST_LOG_TRIVIAL(debug) << "[PlugGen] Tessellation produced " << num_cap_tris << " triangles";
     if (num_cap_tris == 0)
         return TriangleMesh();
 
@@ -200,11 +200,48 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     BOOST_LOG_TRIVIAL(debug) << "[PlugGen] Side walls: " << total_side_tris
         << " triangles (Z-step=" << SIDE_WALL_Z_STEP << "mm)";
 
+    // ── Collect all boundary vertices for snapping ──
+    // The 2D→3D round-trip through integer-scaled Slic3r coordinates
+    // introduces floating-point drift. Cap vertices that sit on the
+    // boundary won't exactly match side-wall vertices, leaving gaps
+    // in the mesh. We snap cap vertices to the nearest boundary vertex
+    // within a tight tolerance so its_merge_vertices (exact equality)
+    // can weld them.
+    std::vector<Vec3f> boundary_pts_front;  // front face positions
+    std::vector<Vec3f> boundary_pts_back;   // back face positions
+    boundary_pts_front.reserve(n + 16);
+    boundary_pts_back.reserve(n + 16);
+    for (int i = 0; i < n; ++i) {
+        boundary_pts_front.push_back(loop[i]);
+        boundary_pts_back.push_back(loop[i] + offset);
+    }
+    for (const auto &inner : boundary.inner_loops) {
+        for (const Vec3f &pt : inner) {
+            boundary_pts_front.push_back(pt);
+            boundary_pts_back.push_back(pt + offset);
+        }
+    }
+
+    // Snap helper: if pt is within tolerance of any boundary vertex,
+    // replace it with the exact boundary vertex.
+    const float snap_tol_sq = 0.001f * 0.001f;  // 1 µm tolerance
+    auto snap_to_boundary = [&](Vec3f &pt, const std::vector<Vec3f> &bpts) {
+        for (const Vec3f &bp : bpts) {
+            if ((pt - bp).squaredNorm() < snap_tol_sq) {
+                pt = bp;
+                return;
+            }
+        }
+    };
+
     // ── 3d: Front cap triangles ──
-    // Convert triangulated 2D points back to 3D and add as vertices.
+    // Convert triangulated 2D points back to 3D and snap to boundary.
     int front_cap_base = (int)vertices.size();
-    for (const Vec2d &p : tri_pts_2d)
-        vertices.push_back(unproject_to_3d(p, origin, u, v));
+    for (const Vec2d &p : tri_pts_2d) {
+        Vec3f v3 = unproject_to_3d(p, origin, u, v);
+        snap_to_boundary(v3, boundary_pts_front);
+        vertices.push_back(v3);
+    }
 
     for (int t = 0; t < num_cap_tris; ++t) {
         int base = front_cap_base + t * 3;
@@ -215,8 +252,11 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     // ── 3e: Back cap triangles ──
     // Same shape but offset inward, with reversed winding.
     int back_cap_base = (int)vertices.size();
-    for (const Vec2d &p : tri_pts_2d)
-        vertices.push_back(unproject_to_3d(p, origin, u, v) + offset);
+    for (const Vec2d &p : tri_pts_2d) {
+        Vec3f v3 = unproject_to_3d(p, origin, u, v) + offset;
+        snap_to_boundary(v3, boundary_pts_back);
+        vertices.push_back(v3);
+    }
 
     for (int t = 0; t < num_cap_tris; ++t) {
         int base = back_cap_base + t * 3;

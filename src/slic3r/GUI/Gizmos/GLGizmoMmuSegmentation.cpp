@@ -1513,7 +1513,7 @@ void GLGizmoMmuSegmentation::perform_hole_fill(const Vec2d &mouse_position)
     }
 
     // Generate the plug mesh.
-    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] Boundary: loop=" << boundary.loop.size()
+    BOOST_LOG_TRIVIAL(debug) << "[HoleFill] Boundary: loop=" << boundary.loop.size()
         << " pts, inner_loops=" << boundary.inner_loops.size()
         << ", normal=(" << boundary.plane_normal.x() << "," << boundary.plane_normal.y()
         << "," << boundary.plane_normal.z() << ")";
