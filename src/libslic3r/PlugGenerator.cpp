@@ -173,25 +173,13 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
 
     Vec3f offset = -normal * depth;  // Inward direction.
 
-    // Nudge: shift the front cap slightly outward to avoid coplanar faces
-    // with the original model surface.  When the plug's front cap is
-    // exactly coplanar with the model (common for bed-facing faces where
-    // both lie on the same Z), the slicer's boolean union can produce
-    // ambiguous results.  A 10 µm outward shift breaks coplanarity
-    // without visibly affecting the print.
-    const float FRONT_NUDGE = 0.01f;  // 10 µm
-    Vec3f front_shift = normal * FRONT_NUDGE;  // outward from surface
-
     // ── 3c: Side walls for outer boundary ──
     // Each edge is Z-subdivided to avoid slicer zigzag artifacts.
-    // Side walls span from front (nudged outward) to back (offset inward).
     int total_side_tris = 0;
     for (int i = 0; i < n; ++i) {
         int i_next = (i + 1) % n;
         size_t before = faces.size();
-        Vec3f wall_offset = offset - front_shift;  // from front to back
-        emit_side_wall_quads(loop[i] + front_shift, loop[i_next] + front_shift,
-                             wall_offset,
+        emit_side_wall_quads(loop[i], loop[i_next], offset,
                              /*reverse_winding=*/false, vertices, faces);
         total_side_tris += (int)(faces.size() - before);
     }
@@ -202,11 +190,9 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
         int in_n = (int)inner.size();
         if (in_n < 3) continue;
 
-        Vec3f wall_offset = offset - front_shift;  // from front to back
         for (int i = 0; i < in_n; ++i) {
             int i_next = (i + 1) % in_n;
-            emit_side_wall_quads(inner[i] + front_shift, inner[i_next] + front_shift,
-                                 wall_offset,
+            emit_side_wall_quads(inner[i], inner[i_next], offset,
                                  /*reverse_winding=*/true, vertices, faces);
         }
     }
@@ -221,17 +207,17 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     // in the mesh. We snap cap vertices to the nearest boundary vertex
     // within a tight tolerance so its_merge_vertices (exact equality)
     // can weld them.
-    std::vector<Vec3f> boundary_pts_front;  // front face positions (nudged)
+    std::vector<Vec3f> boundary_pts_front;  // front face positions
     std::vector<Vec3f> boundary_pts_back;   // back face positions
     boundary_pts_front.reserve(n + 16);
     boundary_pts_back.reserve(n + 16);
     for (int i = 0; i < n; ++i) {
-        boundary_pts_front.push_back(loop[i] + front_shift);
+        boundary_pts_front.push_back(loop[i]);
         boundary_pts_back.push_back(loop[i] + offset);
     }
     for (const auto &inner : boundary.inner_loops) {
         for (const Vec3f &pt : inner) {
-            boundary_pts_front.push_back(pt + front_shift);
+            boundary_pts_front.push_back(pt);
             boundary_pts_back.push_back(pt + offset);
         }
     }
@@ -249,10 +235,10 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     };
 
     // ── 3d: Front cap triangles ──
-    // Convert triangulated 2D points back to 3D, nudged outward, and snap to boundary.
+    // Convert triangulated 2D points back to 3D and snap to boundary.
     int front_cap_base = (int)vertices.size();
     for (const Vec2d &p : tri_pts_2d) {
-        Vec3f v3 = unproject_to_3d(p, origin, u, v) + front_shift;
+        Vec3f v3 = unproject_to_3d(p, origin, u, v);
         snap_to_boundary(v3, boundary_pts_front);
         vertices.push_back(v3);
     }
