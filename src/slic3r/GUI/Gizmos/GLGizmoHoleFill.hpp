@@ -42,6 +42,21 @@ protected:
 public:
     enum class Mode : int { Fill = 0, Cut = 1 };
 
+    // Batch mode state machine
+    enum class BatchState { Inactive, Preview, Committing, Summary };
+
+    struct BatchPreviewEntry {
+        int          object_idx   = -1;
+        int          instance_idx = -1;
+        int          volume_idx   = -1;
+        int          seed_facet   = -1;
+        HoleBoundary boundary;
+        Vec3d        world_center = Vec3d::Zero();
+        bool         is_reference = false;
+    };
+
+    enum class BatchScope { AllFaces = 0, MatchingNormal = 1, SingleSurface = 2 };
+
 private:
     // UI / config state
     Mode   m_mode                  = Mode::Fill;
@@ -49,6 +64,19 @@ private:
     float  m_angle_tolerance       = 5.0f;
     size_t m_selected_extruder_idx = 0;
     std::vector<ColorRGBA> m_extruders_colors;
+
+    // Batch mode state
+    BatchState                     m_batch_state = BatchState::Inactive;
+    std::vector<BatchPreviewEntry> m_batch_preview;
+    BatchScope                     m_batch_scope          = BatchScope::MatchingNormal;
+    bool                           m_batch_all_instances  = true;
+
+    // Reference hole (captured on first click in batch mode)
+    HoleBoundary m_batch_ref_boundary;
+    Vec3f        m_batch_ref_world_normal = Vec3f::Zero();
+    int          m_batch_ref_object_idx   = -1;
+    int          m_batch_ref_volume_idx   = -1;
+    int          m_batch_ref_facet        = -1;
 
     // Hover preview state
     int          m_hover_facet      = -1;
@@ -95,6 +123,16 @@ private:
     bool pick_mesh(const Vec2d& mouse_position, RaycastResult& out) const;
     void reset_hover_state();
     void init_extruders_data();
+
+    // Whether the current selection qualifies for batch mode.
+    bool is_batch_selection() const;
+
+    // Batch actions
+    void enter_batch_preview(const Vec2d& mouse_position);
+    void discover_batch_matches();
+    void commit_batch();
+    void cancel_batch();
+    void clear_batch_preview();
 };
 
 } // namespace GUI
