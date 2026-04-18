@@ -1708,23 +1708,26 @@ void GLGizmoHoleFill::on_render_input_window(float x, float y, float bottom_limi
     }
     m_imgui->disabled_end();
 
-    ImGui::Separator();
+    // Single-click UI: only show when NOT in batch mode.
+    if (!is_batch_selection()) {
+        ImGui::Separator();
 
-    // Pending plug list (placeholder — filled in in a later step).
-    m_imgui->text(m_desc.at("pending_plugs") + ": 0");
+        // Pending plug list (placeholder — filled in in a later step).
+        m_imgui->text(m_desc.at("pending_plugs") + ": 0");
 
-    m_imgui->text(m_desc.at("shift_fill_all"));
+        m_imgui->text(m_desc.at("shift_fill_all"));
 
-    ImGui::Separator();
+        ImGui::Separator();
 
-    // Apply / Cancel (stubs — wired up in a later step).
-    // Apply is disabled until pending-plug workflow is implemented (step 5).
-    m_imgui->disabled_begin(true);
-    m_imgui->button(m_desc.at("apply"));
-    m_imgui->disabled_end();
-    ImGui::SameLine();
-    if (m_imgui->button(m_desc.at("cancel"))) {
-        reset_hover_state();
+        // Apply / Cancel (stubs — wired up in a later step).
+        // Apply is disabled until pending-plug workflow is implemented (step 5).
+        m_imgui->disabled_begin(true);
+        m_imgui->button(m_desc.at("apply"));
+        m_imgui->disabled_end();
+        ImGui::SameLine();
+        if (m_imgui->button(m_desc.at("cancel"))) {
+            reset_hover_state();
+        }
     }
 
     GizmoImguiEnd();
