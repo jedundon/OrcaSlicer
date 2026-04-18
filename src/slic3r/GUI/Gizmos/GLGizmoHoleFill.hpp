@@ -69,7 +69,7 @@ private:
     BatchState                     m_batch_state = BatchState::Inactive;
     std::vector<BatchPreviewEntry> m_batch_preview;
     BatchScope                     m_batch_scope          = BatchScope::MatchingNormal;
-    bool                           m_batch_all_instances  = true;
+    bool                           m_batch_all_instances  = false;
 
     // Reference hole (captured on first click in batch mode)
     HoleBoundary m_batch_ref_boundary;
