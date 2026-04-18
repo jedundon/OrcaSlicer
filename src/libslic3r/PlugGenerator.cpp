@@ -115,14 +115,40 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     build_plane_frame(normal, u, v);
 
     // ── Step 1: Create a Slic3r Polygon from the boundary loop ──────────
-    // Project 3D boundary to 2D, then convert to scaled Slic3r Points.
+    // Z-subdivide boundary edges and project to 2D.  The side walls also
+    // Z-subdivide each edge; if the cap polygon only keeps the original
+    // corners, the cap's boundary edge (corner->corner) won't share edges
+    // with the side wall's subdivided segments (corner->sub1->sub2->corner).
+    // By inserting the same subdivision points into the cap polygon, the
+    // tessellator produces cap triangles whose boundary edges exactly match
+    // the side-wall strip endpoints, yielding a manifold mesh.
+
+    Vec3f offset = -normal * depth;  // Inward direction.
+
+    // Build the subdivided 3D ring AND its 2D projection simultaneously.
+    std::vector<Vec3f> subdiv_loop_front;   // subdivided 3D front positions
+    std::vector<Vec3f> subdiv_loop_back;    // subdivided 3D back positions
     Polygon poly_2d;
-    poly_2d.points.reserve(n);
+
     for (int i = 0; i < n; ++i) {
-        Vec2d p = project_to_2d(loop[i], origin, u, v);
-        // Slic3r's Polygon uses scaled integer coordinates.
-        poly_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
+        int i_next = (i + 1) % n;
+        float dz = std::abs(loop[i_next].z() - loop[i].z());
+        int n_sub = 1;
+        if (dz > SIDE_WALL_Z_STEP)
+            n_sub = std::min((int)std::ceil(dz / SIDE_WALL_Z_STEP), 500);
+
+        // Emit subdivision points for this edge (exclude the last point;
+        // it will be the first point of the next edge, or wrap around).
+        for (int s = 0; s < n_sub; ++s) {
+            float t = (float)s / (float)n_sub;
+            Vec3f pt = loop[i] + t * (loop[i_next] - loop[i]);
+            subdiv_loop_front.push_back(pt);
+            subdiv_loop_back.push_back(pt + offset);
+            Vec2d p = project_to_2d(pt, origin, u, v);
+            poly_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
+        }
     }
+    const int n_subdiv = (int)subdiv_loop_front.size();
 
     // Detect original 2D winding before canonicalisation.
     bool outer_is_ccw = poly_2d.is_counter_clockwise();
@@ -186,18 +212,14 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     std::vector<Vec3f> vertices;
     std::vector<Vec3i32> faces;
 
-    Vec3f offset = -normal * depth;  // Inward direction.
-
     // ── 3c: Side walls for outer boundary ──
-    // Each edge is Z-subdivided to avoid slicer zigzag artifacts.
-    // If the original loop was CW in UV, the tessellator reversed it to CCW.
-    // The cap's boundary edges now traverse opposite to the raw loop order,
-    // so side walls must also reverse to keep shared edges manifold.
+    // Walk the subdivided ring.  Each consecutive pair is one side-wall
+    // quad (no further Z-subdivision needed -- already subdivided above).
     int total_side_tris = 0;
-    for (int i = 0; i < n; ++i) {
-        int i_next = (i + 1) % n;
+    for (int i = 0; i < n_subdiv; ++i) {
+        int i_next = (i + 1) % n_subdiv;
         size_t before = faces.size();
-        emit_side_wall_quads(loop[i], loop[i_next], offset,
+        emit_side_wall_quads(subdiv_loop_front[i], subdiv_loop_front[i_next], offset,
                              /*reverse_winding=*/!outer_is_ccw, vertices, faces);
         total_side_tris += (int)(faces.size() - before);
     }
@@ -213,9 +235,13 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
         int in_n = (int)inner.size();
         if (in_n < 3) continue;
 
-        // Original CCW → canonicalised to CW (flipped) → side walls need normal winding
-        // Original CW  → kept as CW (no flip) → side walls need reversed winding
-        bool reverse = (idx < inner_is_ccw.size()) ? !inner_is_ccw[idx] : true;
+        // The cap tessellation canonicalises inner holes to CW.  Side walls must
+        // produce the REVERSE edge direction at the cap junction for manifold edges.
+        // Original CW  -> no flip during canonicalisation -> side wall raw order
+        //   matches cap -> side walls need normal winding (reverse=false).
+        // Original CCW -> flipped to CW -> cap boundary reversed relative to raw
+        //   loop -> side walls must reverse to match (reverse=true).
+        bool reverse = (idx < inner_is_ccw.size()) ? inner_is_ccw[idx] : true;
         for (int i = 0; i < in_n; ++i) {
             int i_next = (i + 1) % in_n;
             emit_side_wall_quads(inner[i], inner[i_next], offset,
@@ -233,13 +259,15 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     // in the mesh. We snap cap vertices to the nearest boundary vertex
     // within a tight tolerance so its_merge_vertices (exact equality)
     // can weld them.
+    // Use the subdivided ring (includes original corners plus Z-subdivision
+    // intermediates) so every cap boundary vertex can snap.
     std::vector<Vec3f> boundary_pts_front;  // front face positions
     std::vector<Vec3f> boundary_pts_back;   // back face positions
-    boundary_pts_front.reserve(n + 16);
-    boundary_pts_back.reserve(n + 16);
-    for (int i = 0; i < n; ++i) {
-        boundary_pts_front.push_back(loop[i]);
-        boundary_pts_back.push_back(loop[i] + offset);
+    boundary_pts_front.reserve(n_subdiv + 16);
+    boundary_pts_back.reserve(n_subdiv + 16);
+    for (int i = 0; i < n_subdiv; ++i) {
+        boundary_pts_front.push_back(subdiv_loop_front[i]);
+        boundary_pts_back.push_back(subdiv_loop_back[i]);
     }
     for (const auto &inner : boundary.inner_loops) {
         for (const Vec3f &pt : inner) {
