@@ -26,6 +26,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <queue>
 #include <set>
 
 #include <boost/log/trivial.hpp>
@@ -1011,35 +1012,33 @@ void GLGizmoHoleFill::discover_batch_matches()
                 BOOST_LOG_TRIVIAL(warning) << "[HoleFill] discover obj=" << obj_idx << " inst=" << inst_idx
                     << " vol=" << vi << " name=" << vol->name << " tris=" << its.indices.size();
 
-                // Pick at most one seed per unique quantized local-normal direction.
-                // Disconnected coplanar islands with identical normals collapse to one
-                // seed — a v1 limitation, acceptable here.
-                std::set<uint64_t> seen_buckets;
-                std::vector<int>   seeds;
-                seeds.reserve(16);
+                // Build face neighbors once per volume for flood-fill region tracking.
+                const std::vector<Vec3i32> face_neighbors = its_face_neighbors(its);
+                const float cos_tol_local = std::cos(m_angle_tolerance * (float)M_PI / 180.0f);
+
+                // Track which facets have been assigned to a coplanar region so we
+                // visit each region at most once.
+                std::vector<bool> visited(its.indices.size(), false);
+                int regions_tried = 0, regions_with_holes = 0;
 
                 for (int fi = 0; fi < (int)its.indices.size(); ++fi) {
+                    if (visited[fi])
+                        continue;
+
+                    // Compute face normal.
                     const auto& tri = its.indices[fi];
                     const Vec3f& v0 = its.vertices[tri[0]];
                     const Vec3f& v1 = its.vertices[tri[1]];
                     const Vec3f& v2 = its.vertices[tri[2]];
                     Vec3f local_n = (v1 - v0).cross(v2 - v0);
                     const float len = local_n.norm();
-                    if (len < 1e-9f)
+                    if (len < 1e-9f) {
+                        visited[fi] = true;
                         continue;
+                    }
                     local_n /= len;
 
-                    // Pack three quantized components ([-100,100] → 16-bit each) into a 64-bit key.
-                    const int kx = (int)std::round(local_n.x() * 100.0f);
-                    const int ky = (int)std::round(local_n.y() * 100.0f);
-                    const int kz = (int)std::round(local_n.z() * 100.0f);
-                    const uint64_t key =
-                        ((uint64_t)(uint16_t)(int16_t)kx << 32)
-                      | ((uint64_t)(uint16_t)(int16_t)ky << 16)
-                      |  (uint64_t)(uint16_t)(int16_t)kz;
-                    if (!seen_buckets.insert(key).second)
-                        continue;
-
+                    // Check if this face's world normal matches the reference.
                     bool matches = false;
                     if (m_batch_scope == BatchScope::AllFaces) {
                         matches = true;
@@ -1047,19 +1046,44 @@ void GLGizmoHoleFill::discover_batch_matches()
                         Vec3f world_n = (normal_mat * local_n).normalized();
                         matches = world_n.dot(m_batch_ref_world_normal) > cos_tol;
                     }
-                    if (matches)
-                        seeds.push_back(fi);
-                }
 
-                BOOST_LOG_TRIVIAL(warning) << "[HoleFill] discover obj=" << obj_idx << " vol=" << vi
-                    << " seeds=" << seeds.size();
+                    if (!matches) {
+                        visited[fi] = true;
+                        continue;
+                    }
 
-                for (int seed_fi : seeds) {
+                    // Flood-fill from this facet to mark the entire coplanar region
+                    // as visited, regardless of whether it contains holes.
+                    std::queue<int> ff_queue;
+                    ff_queue.push(fi);
+                    visited[fi] = true;
+                    while (!ff_queue.empty()) {
+                        int cf = ff_queue.front();
+                        ff_queue.pop();
+                        for (int ni = 0; ni < 3; ++ni) {
+                            int nb = face_neighbors[cf][ni];
+                            if (nb < 0 || visited[nb])
+                                continue;
+                            // Check coplanarity with the seed normal.
+                            const auto& ntri = its.indices[nb];
+                            Vec3f nn = (its.vertices[ntri[1]] - its.vertices[ntri[0]])
+                                .cross(its.vertices[ntri[2]] - its.vertices[ntri[0]]);
+                            float nn_len = nn.norm();
+                            if (nn_len > 1e-9f && (nn / nn_len).dot(local_n) >= cos_tol_local) {
+                                visited[nb] = true;
+                                ff_queue.push(nb);
+                            }
+                        }
+                    }
+
+                    ++regions_tried;
+
+                    // Now call find_hole_boundaries with this seed.
                     std::vector<HoleBoundary> boundaries =
-                        find_hole_boundaries(its, seed_fi, m_angle_tolerance);
-                    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] seed=" << seed_fi << " boundaries=" << boundaries.size();
+                        find_hole_boundaries(its, fi, m_angle_tolerance);
                     if (boundaries.empty())
                         continue;
+                    ++regions_with_holes;
 
                     // SingleSurface: drop results whose plane doesn't match the reference.
                     bool skip_single_surface = false;
@@ -1079,7 +1103,7 @@ void GLGizmoHoleFill::discover_batch_matches()
                         entry.object_idx   = obj_idx;
                         entry.instance_idx = inst_idx;
                         entry.volume_idx   = vi;
-                        entry.seed_facet   = seed_fi;
+                        entry.seed_facet   = fi;
                         entry.boundary     = boundaries[bi];
                         entry.world_center = trafo * boundaries[bi].plane_origin.cast<double>();
                         entry.is_reference = (obj_idx == m_batch_ref_object_idx
@@ -1087,6 +1111,10 @@ void GLGizmoHoleFill::discover_batch_matches()
                         m_batch_preview.push_back(std::move(entry));
                     }
                 }
+
+                BOOST_LOG_TRIVIAL(warning) << "[HoleFill] discover obj=" << obj_idx << " vol=" << vi
+                    << " regions_tried=" << regions_tried << " regions_with_holes=" << regions_with_holes
+                    << " total_preview=" << m_batch_preview.size();
             }
         }
     }
