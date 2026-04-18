@@ -7,6 +7,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <algorithm>
 
 namespace Slic3r {
@@ -270,7 +271,40 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     its.indices  = std::move(faces);
 
     // Merge duplicate vertices to clean up the mesh.
+    int pre_merge_verts = (int)its.vertices.size();
+    int pre_merge_faces = (int)its.indices.size();
     its_merge_vertices(its);
+    int post_merge_verts = (int)its.vertices.size();
+    int post_merge_faces = (int)its.indices.size();
+    int degenerate_faces = 0;
+    for (const auto &f : its.indices) {
+        if (f[0] == f[1] || f[1] == f[2] || f[0] == f[2])
+            ++degenerate_faces;
+    }
+
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Mesh: "
+        << pre_merge_verts << "->" << post_merge_verts << " verts, "
+        << pre_merge_faces << "->" << post_merge_faces << " faces, "
+        << degenerate_faces << " degenerate"
+        << " (normal=" << normal.x() << "," << normal.y() << "," << normal.z() << ")";
+
+    // Dump plug mesh to STL in user's temp directory for inspection.
+    {
+        static int plug_id = 0;
+        // Use USERPROFILE\Downloads on Windows, /tmp on Linux.
+        std::string tmp_dir;
+        const char *userprofile = std::getenv("USERPROFILE");
+        if (userprofile)
+            tmp_dir = std::string(userprofile) + "\\Downloads";
+        else
+            tmp_dir = "/tmp";
+        const char *tmp = tmp_dir.c_str();
+        std::string dump_path = std::string(tmp) + "/holefill_plug_" + std::to_string(plug_id++) + ".stl";
+        if (its_write_stl_ascii(dump_path.c_str(), "holefill_plug", its))
+            BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Dumped mesh to " << dump_path;
+        else
+            BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Failed to dump mesh to " << dump_path;
+    }
 
     TriangleMesh mesh(std::move(its));
     return mesh;
