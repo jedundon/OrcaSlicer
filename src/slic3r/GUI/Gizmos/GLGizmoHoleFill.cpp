@@ -1360,7 +1360,12 @@ void GLGizmoHoleFill::on_render()
 
 void GLGizmoHoleFill::on_render_input_window(float x, float y, float bottom_limit)
 {
-    if (!m_c || !m_c->selection_info() || !m_c->selection_info()->model_object())
+    if (!m_c || !m_c->selection_info())
+        return;
+    // model_object() is null when multiple objects are selected (get_object_idx returns -1).
+    // In batch mode we still need to render the UI, so only bail for single-object mode.
+    const bool multi_select = is_batch_selection();
+    if (!multi_select && !m_c->selection_info()->model_object())
         return;
 
     // Refresh extruder colors in case they changed since data_changed().

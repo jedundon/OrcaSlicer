@@ -113,8 +113,11 @@ void SelectionInfo::on_update()
     // BBS still keep object pointer when selection is volume
     // if (selection.is_single_full_instance()) {
     if (!selection.is_empty()) {
-        m_model_object = selection.get_model()->objects[selection.get_object_idx()];
-        m_z_shift = selection.get_first_volume()->get_sla_shift_z();
+        int obj_idx = selection.get_object_idx();
+        if (obj_idx >= 0 && obj_idx < (int)selection.get_model()->objects.size()) {
+            m_model_object = selection.get_model()->objects[obj_idx];
+            m_z_shift = selection.get_first_volume()->get_sla_shift_z();
+        }
     }
 }
 
