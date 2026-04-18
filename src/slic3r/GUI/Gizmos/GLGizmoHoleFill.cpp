@@ -1217,8 +1217,12 @@ void GLGizmoHoleFill::commit_batch()
         NotificationManager::NotificationLevel::RegularNotificationLevel,
         msg);
 
-    m_batch_state = BatchState::Summary;
+    // Close the gizmo after batch apply so the user gets immediate visual
+    // feedback (new volumes visible) and can re-open for the next face.
+    m_batch_state = BatchState::Inactive;
+    clear_batch_preview();
     m_parent.set_as_dirty();
+    m_parent.get_gizmos_manager().reset_all_states();
 }
 
 void GLGizmoHoleFill::cancel_batch()
