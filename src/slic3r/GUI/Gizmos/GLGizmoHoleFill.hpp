@@ -89,6 +89,7 @@ private:
     void perform_hole_fill(const Vec2d& mouse_position);
     void perform_hole_remove();
     void perform_fill_all_on_surface(const Vec2d& mouse_position);
+    void perform_remove_all_on_surface(const Vec2d& mouse_position);
     void render_hole_fill_hover();
     void render_remove_hover();
     bool pick_mesh(const Vec2d& mouse_position, RaycastResult& out) const;

@@ -50,6 +50,7 @@ bool GLGizmoHoleFill::on_init()
     m_desc["mode_cut"]        = _L("Cut");
     m_desc["island_warning"]  = _L("Warning: This hole has islands that may become disconnected after cutting. Consider using Fill mode instead.");
     m_desc["shift_fill_all"]  = _L("Shift+Click: Fill all holes on surface");
+    m_desc["shift_remove_all"] = _L("Shift+Click plug: remove all on surface");
 
     init_extruders_data();
     return true;
@@ -233,9 +234,12 @@ bool GLGizmoHoleFill::on_mouse(const wxMouseEvent& mouse_event)
     if (mouse_event.LeftDown()) {
         const Vec2d mp(mouse_event.GetX(), mouse_event.GetY());
         update_hover(mp);
-        if (m_hover_is_plug)
-            perform_hole_remove();
-        else if (mouse_event.ShiftDown())
+        if (m_hover_is_plug) {
+            if (mouse_event.ShiftDown())
+                perform_remove_all_on_surface(mp);
+            else
+                perform_hole_remove();
+        } else if (mouse_event.ShiftDown())
             perform_fill_all_on_surface(mp);
         else
             perform_hole_fill(mp);
@@ -575,6 +579,127 @@ void GLGizmoHoleFill::perform_fill_all_on_surface(const Vec2d& mouse_position)
         NotificationType::CustomNotification,
         NotificationManager::NotificationLevel::RegularNotificationLevel,
         msg);
+}
+
+void GLGizmoHoleFill::perform_remove_all_on_surface(const Vec2d& /*mouse_position*/)
+{
+    const Selection& selection = m_parent.get_selection();
+    if (selection.is_empty())
+        return;
+
+    const ModelObject* mo = m_c->selection_info()->model_object();
+    if (!mo)
+        return;
+
+    int object_idx = selection.get_object_idx();
+    if (object_idx < 0)
+        return;
+
+    if (m_hover_plug_raw_idx < 0 || m_hover_plug_raw_idx >= (int)mo->volumes.size())
+        return;
+    const ModelVolume* hover_plug = mo->volumes[m_hover_plug_raw_idx];
+    if (!hover_plug
+        || hover_plug->name.rfind("HoleFill_", 0) != 0
+        || hover_plug->name.rfind("HoleFill_neg_", 0) == 0)
+        return;
+
+    // Parse "HoleFill_[neg_]{vol_idx}_(f{facet}|surf{facet}_{hole})".
+    auto parse_src_and_facet = [](const std::string& name, int& out_vol, int& out_facet) -> bool {
+        const std::string prefix = "HoleFill_";
+        if (name.rfind(prefix, 0) != 0)
+            return false;
+        size_t pos = prefix.size();
+        if (name.compare(pos, 4, "neg_") == 0)
+            pos += 4;
+        size_t us = name.find('_', pos);
+        if (us == std::string::npos || us == pos)
+            return false;
+        try {
+            out_vol = std::stoi(name.substr(pos, us - pos));
+        } catch (...) { return false; }
+        pos = us + 1;
+        if (pos < name.size() && name[pos] == 'f')
+            pos += 1;
+        else if (name.compare(pos, 4, "surf") == 0)
+            pos += 4;
+        else
+            return false;
+        size_t end = name.find('_', pos);
+        std::string num = (end == std::string::npos) ? name.substr(pos) : name.substr(pos, end - pos);
+        if (num.empty())
+            return false;
+        try {
+            out_facet = std::stoi(num);
+        } catch (...) { return false; }
+        return true;
+    };
+
+    int src_vol_idx = -1;
+    int src_facet   = -1;
+    if (!parse_src_and_facet(hover_plug->name, src_vol_idx, src_facet))
+        return;
+    if (src_vol_idx < 0 || src_vol_idx >= (int)mo->volumes.size())
+        return;
+    const ModelVolume* src_vol = mo->volumes[src_vol_idx];
+    if (!src_vol || !src_vol->is_model_part()
+        || src_vol->name.rfind("HoleFill_", 0) == 0)
+        return;
+
+    const indexed_triangle_set& src_its = src_vol->mesh().its;
+    if (src_facet < 0 || src_facet >= (int)src_its.indices.size())
+        return;
+
+    const auto& tri = src_its.indices[src_facet];
+    const Vec3d v0  = src_its.vertices[tri[0]].cast<double>();
+    const Vec3d v1  = src_its.vertices[tri[1]].cast<double>();
+    const Vec3d v2  = src_its.vertices[tri[2]].cast<double>();
+    Vec3d normal = (v1 - v0).cross(v2 - v0);
+    if (normal.norm() < 1e-9)
+        return;
+    normal.normalize();
+
+    const Vec3d ref_center = hover_plug->mesh().bounding_box().center();
+    const double tol = 0.5; // 0.5 mm plane tolerance
+
+    std::vector<int> to_delete;
+    to_delete.reserve(8);
+    for (int vi = 0; vi < (int)mo->volumes.size(); ++vi) {
+        const ModelVolume* v = mo->volumes[vi];
+        if (!v)
+            continue;
+        if (v->name.rfind("HoleFill_", 0) != 0)
+            continue;
+        int vol_idx = -1, facet = -1;
+        if (!parse_src_and_facet(v->name, vol_idx, facet))
+            continue;
+        if (vol_idx != src_vol_idx)
+            continue;
+        const Vec3d c = v->mesh().bounding_box().center();
+        const double d = std::abs((c - ref_center).dot(normal));
+        if (d < tol)
+            to_delete.push_back(vi);
+    }
+
+    if (to_delete.empty())
+        return;
+
+    // Delete in descending order so earlier deletions don't shift later indices.
+    std::sort(to_delete.begin(), to_delete.end());
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Remove all hole fills on surface");
+
+    ModelObject* mo_mut = wxGetApp().model().objects[object_idx];
+    for (auto it = to_delete.rbegin(); it != to_delete.rend(); ++it)
+        mo_mut->delete_volume((size_t)*it);
+
+    wxGetApp().plater()->update();
+    wxGetApp().obj_list()->update_info_items((size_t)object_idx);
+
+    const int removed = (int)to_delete.size();
+    wxGetApp().plater()->get_notification_manager()->push_notification(
+        NotificationType::CustomNotification,
+        NotificationManager::NotificationLevel::RegularNotificationLevel,
+        Slic3r::GUI::format(_L("Removed %1% hole fill(s) from surface."), removed));
 }
 
 void GLGizmoHoleFill::render_remove_hover()
