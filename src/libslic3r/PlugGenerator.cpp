@@ -1,6 +1,6 @@
 #include "PlugGenerator.hpp"
 #include "ExPolygon.hpp"
-#include "Tesselate.hpp"
+#include "Triangulation.hpp"
 #include "libslic3r.h" // for SCALING_FACTOR
 
 #include <boost/log/trivial.hpp>
@@ -46,58 +46,6 @@ Vec3f unproject_to_3d(const Vec2d &pt2d, const Vec3f &origin,
 // visible sawtooth artifacts.
 static constexpr float SIDE_WALL_Z_STEP = 0.05f;  // 50 µm
 
-// Emit side-wall quads between two boundary-ring edge endpoints,
-// subdividing along Z when the edge's Z-span exceeds SIDE_WALL_Z_STEP.
-// `front_a / front_b` are the 3D positions of the two consecutive ring
-// vertices on the front cap; `back_offset` is the vector from front to back.
-// `reverse_winding` flips the triangle winding (used for inner-loop walls).
-static void emit_side_wall_quads(
-    const Vec3f &front_a, const Vec3f &front_b,
-    const Vec3f &back_offset,
-    bool         reverse_winding,
-    std::vector<Vec3f>    &vertices,
-    std::vector<Vec3i32>  &faces)
-{
-    float dz = std::abs(front_b.z() - front_a.z());
-
-    // Number of subdivisions along this edge.
-    // Skip subdivision for near-horizontal edges — their diagonal's Z-shift
-    // is already negligible regardless of layer height.
-    int n_sub = 1;
-    if (dz > SIDE_WALL_Z_STEP)
-        n_sub = std::min((int)std::ceil(dz / SIDE_WALL_Z_STEP), 500);
-
-    // We always emit new vertices for the intermediate strip endpoints.
-    // The first point coincides with front_a, the last with front_b.
-    int base = (int)vertices.size();
-
-    // Push front and back ring for each subdivision point.
-    for (int s = 0; s <= n_sub; ++s) {
-        float t = (float)s / (float)n_sub;
-        Vec3f pt_front = front_a + t * (front_b - front_a);
-        vertices.push_back(pt_front);
-        vertices.push_back(pt_front + back_offset);
-    }
-    // Vertex layout at `base`:
-    //   base + 2*s     = front point for strip s
-    //   base + 2*s + 1 = back  point for strip s
-
-    for (int s = 0; s < n_sub; ++s) {
-        int f0 = base + 2 * s;       // front current
-        int b0 = base + 2 * s + 1;   // back  current
-        int f1 = base + 2 * (s + 1); // front next
-        int b1 = base + 2 * (s + 1) + 1; // back next
-
-        if (!reverse_winding) {
-            faces.push_back(Vec3i32(f0, b0, f1));
-            faces.push_back(Vec3i32(f1, b0, b1));
-        } else {
-            faces.push_back(Vec3i32(f0, f1, b0));
-            faces.push_back(Vec3i32(f1, b1, b0));
-        }
-    }
-}
-
 // ─── main implementation ─────────────────────────────────────────────────────
 
 TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
@@ -114,334 +62,287 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     Vec3f u, v;
     build_plane_frame(normal, u, v);
 
-    // ── Step 1: Create a Slic3r Polygon from the boundary loop ──────────
-    // Project 3D boundary to 2D, then convert to scaled Slic3r Points.
-    // The cap polygon uses the original loop corners (not Z-subdivided)
-    // so the tessellator produces clean triangles.  Z-subdivision points
-    // are added later as stitching fan triangles to bridge cap edges to
-    // the finer side-wall segmentation (see Step 3f).
-
     Vec3f offset = -normal * depth;  // Inward direction.
 
-    Polygon poly_2d;
-    poly_2d.points.reserve(n);
-    for (int i = 0; i < n; ++i) {
-        Vec2d p = project_to_2d(loop[i], origin, u, v);
-        poly_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
-    }
+    // ── Step 1: Build ring vertex arrays with Z-subdivision ─────────────
+    // For each boundary edge, if the Z-span exceeds SIDE_WALL_Z_STEP we
+    // insert intermediate vertices along the edge.  These intermediates
+    // become part of both the cap polygon (as CDT constraint edges) and
+    // the side walls, ensuring bit-exact vertex sharing and a watertight
+    // manifold mesh after its_merge_vertices.
+    //
+    // We build parallel arrays:
+    //   pts_2d       — scaled integer 2D coordinates for CDT input
+    //   pts_3d_front — exact 3D positions on the front face
+    //   pts_3d_back  — exact 3D positions on the back face (= front + offset)
+    //
+    // The outer ring occupies indices [0, outer_ring_size).
+    // Each inner ring occupies a contiguous range after that.
 
-    // Pre-compute Z-subdivision for each boundary edge.  This table is
-    // shared by the side-wall emitter and the cap-stitching fan generator.
-    // subdiv_pts[i] = list of INTERMEDIATE 3D points between loop[i] and
-    // loop[(i+1)%n], NOT including the endpoints.  Empty if n_sub == 1.
-    std::vector<std::vector<Vec3f>> subdiv_pts(n);
-    for (int i = 0; i < n; ++i) {
-        int i_next = (i + 1) % n;
-        float dz = std::abs(loop[i_next].z() - loop[i].z());
+    Points              pts_2d;        // CDT input (Slic3r scaled integer coords)
+    std::vector<Vec3f>  pts_3d_front;  // exact 3D positions (front face)
+
+    // Track ring structure: each ring is a contiguous range of indices.
+    struct Ring {
+        uint32_t start;
+        uint32_t count;
+    };
+    std::vector<Ring> rings;  // rings[0] = outer, rings[1..] = inner holes
+
+    // Helper: add a 3D point to the arrays and return its index.
+    auto add_point = [&](const Vec3f &pt3d) -> uint32_t {
+        uint32_t idx = (uint32_t)pts_2d.size();
+        Vec2d p2 = project_to_2d(pt3d, origin, u, v);
+        pts_2d.emplace_back(Point(scale_(p2.x()), scale_(p2.y())));
+        pts_3d_front.push_back(pt3d);
+        return idx;
+    };
+
+    // Helper: Z-subdivide edge from pt_a to pt_b and add all points
+    // (including pt_a, excluding pt_b since pt_b is the next edge's start).
+    auto add_ring_edge = [&](const Vec3f &pt_a, const Vec3f &pt_b) {
+        add_point(pt_a);
+        float dz = std::abs(pt_b.z() - pt_a.z());
         int n_sub = 1;
         if (dz > SIDE_WALL_Z_STEP)
             n_sub = std::min((int)std::ceil(dz / SIDE_WALL_Z_STEP), 500);
         if (n_sub > 1) {
-            subdiv_pts[i].reserve(n_sub - 1);
             for (int s = 1; s < n_sub; ++s) {
                 float t = (float)s / (float)n_sub;
-                subdiv_pts[i].push_back(loop[i] + t * (loop[i_next] - loop[i]));
+                Vec3f mp = pt_a + t * (pt_b - pt_a);
+                add_point(mp);
             }
         }
+    };
+
+    // ── Outer ring ──
+    uint32_t outer_start = (uint32_t)pts_2d.size();
+    for (int i = 0; i < n; ++i) {
+        int i_next = (i + 1) % n;
+        add_ring_edge(loop[i], loop[i_next]);
     }
-
-    // Detect original 2D winding before canonicalisation.
-    bool outer_is_ccw = poly_2d.is_counter_clockwise();
-
-    // Ensure CCW orientation (for correct triangulation normals).
-    if (poly_2d.is_clockwise())
-        poly_2d.reverse();
-
-    // Wrap in ExPolygon with inner loops (islands) as holes.
-    ExPolygon expoly;
-    expoly.contour = std::move(poly_2d);
+    uint32_t outer_count = (uint32_t)pts_2d.size() - outer_start;
+    rings.push_back({outer_start, outer_count});
 
     BOOST_LOG_TRIVIAL(warning) << "[PlugGen] boundary.inner_loops.size() = "
         << boundary.inner_loops.size()
         << " (normal=" << normal.x() << "," << normal.y() << "," << normal.z() << ")";
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Outer ring: " << n << " corners -> "
+        << outer_count << " vertices (with Z-subdivision)";
 
-    // Add inner loops (e.g., the counter inside letter "A") as holes in the ExPolygon.
-    // These regions will NOT be filled — they stay as part of the original surface.
-    // Track original winding of each inner loop so side walls match cap edges.
-    std::vector<bool> inner_is_ccw;
-    inner_is_ccw.reserve(boundary.inner_loops.size());
-    for (const auto &inner : boundary.inner_loops) {
-        Polygon hole_2d;
-        hole_2d.points.reserve(inner.size());
-        for (const Vec3f &pt : inner) {
-            Vec2d p = project_to_2d(pt, origin, u, v);
-            hole_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
+    // ── Inner rings (island holes) ──
+    for (size_t il = 0; il < boundary.inner_loops.size(); ++il) {
+        const auto &inner = boundary.inner_loops[il];
+        int in_n = (int)inner.size();
+        if (in_n < 3) continue;
+        uint32_t inner_start = (uint32_t)pts_2d.size();
+        for (int i = 0; i < in_n; ++i) {
+            int i_next = (i + 1) % in_n;
+            add_ring_edge(inner[i], inner[i_next]);
         }
-        inner_is_ccw.push_back(hole_2d.is_counter_clockwise());
-        // Holes in ExPolygon must be CW (opposite of contour).
-        if (hole_2d.is_counter_clockwise())
-            hole_2d.reverse();
-        expoly.holes.push_back(std::move(hole_2d));
+        uint32_t inner_count = (uint32_t)pts_2d.size() - inner_start;
+        rings.push_back({inner_start, inner_count});
+        BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Inner ring " << il << ": "
+            << in_n << " corners -> " << inner_count << " vertices";
     }
 
-    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Winding: outer_is_ccw=" << outer_is_ccw
-        << ", inner_is_ccw count=" << inner_is_ccw.size();
+    uint32_t n_all = (uint32_t)pts_2d.size();
 
-    // ── Step 2: Triangulate the cap face ────────────────────────────────
-    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] ExPolygon contour: " << expoly.contour.points.size()
-        << " pts, " << expoly.holes.size() << " holes";
-    for (size_t hi = 0; hi < expoly.holes.size(); ++hi) {
-        BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Hole " << hi << ": "
-            << expoly.holes[hi].points.size() << " pts, area="
-            << std::abs(expoly.holes[hi].area());
+    // Build pts_3d_back from pts_3d_front + offset.
+    std::vector<Vec3f> pts_3d_back(n_all);
+    for (uint32_t i = 0; i < n_all; ++i)
+        pts_3d_back[i] = pts_3d_front[i] + offset;
+
+    // ── Step 2: Canonicalize ring winding for CDT ───────────────────────
+    // CDT needs: outer ring CCW, inner rings CW (as 2D integer polygons).
+    // Check each ring's winding and reverse if needed.  We also track
+    // the original winding for side-wall emission.
+
+    // Compute signed area of a ring in the pts_2d array.
+    auto ring_signed_area = [&](const Ring &r) -> double {
+        double area = 0;
+        for (uint32_t i = 0; i < r.count; ++i) {
+            uint32_t j = (i + 1) % r.count;
+            const Point &pi = pts_2d[r.start + i];
+            const Point &pj = pts_2d[r.start + j];
+            area += (double)pi.x() * pj.y() - (double)pj.x() * pi.y();
+        }
+        return area;  // > 0 = CCW
+    };
+
+    // Reverse a ring's entries in all parallel arrays.
+    auto reverse_ring = [&](const Ring &r) {
+        std::reverse(pts_2d.begin() + r.start, pts_2d.begin() + r.start + r.count);
+        std::reverse(pts_3d_front.begin() + r.start, pts_3d_front.begin() + r.start + r.count);
+        std::reverse(pts_3d_back.begin() + r.start, pts_3d_back.begin() + r.start + r.count);
+    };
+
+    // Outer ring: must be CCW.
+    bool outer_was_ccw = (ring_signed_area(rings[0]) > 0);
+    if (!outer_was_ccw) {
+        reverse_ring(rings[0]);
     }
 
-    // Use the existing Slic3r tessellation which handles concave polygons.
-    std::vector<Vec2d> tri_pts_2d = triangulate_expolygon_2d(expoly, NORMALS_UP);
-    // tri_pts_2d contains groups of 3 points (triangle vertices).
-    int num_cap_tris = (int)tri_pts_2d.size() / 3;
-    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Tessellation produced " << num_cap_tris << " triangles";
+    // Inner rings: must be CW.
+    std::vector<bool> inner_was_ccw;
+    for (size_t ri = 1; ri < rings.size(); ++ri) {
+        bool is_ccw = (ring_signed_area(rings[ri]) > 0);
+        inner_was_ccw.push_back(is_ccw);
+        if (is_ccw) {
+            reverse_ring(rings[ri]);
+        }
+    }
+
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Winding: outer_was_ccw=" << outer_was_ccw
+        << ", inner rings=" << inner_was_ccw.size();
+
+    // ── Step 3: Check for duplicate 2D points ───────────────────────────
+    // CDT requires unique points.  Z-subdivision intermediates on edges
+    // that differ only in Z could project to the same 2D point.
+    // Use the Triangulation::Changes API to handle duplicates.
+    Points dup_pts = collect_duplicates(pts_2d);
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Duplicate 2D points: " << dup_pts.size();
+
+    // ── Step 4: Build constraint half-edges ─────────────────────────────
+    Triangulation::HalfEdges half_edges;
+    half_edges.reserve(n_all);
+
+    if (dup_pts.empty()) {
+        // No duplicates — straightforward edge insertion.
+        for (const auto &ring : rings) {
+            for (uint32_t i = 0; i < ring.count; ++i) {
+                uint32_t a = ring.start + i;
+                uint32_t b = ring.start + ((i + 1) % ring.count);
+                half_edges.push_back({a, b});
+            }
+        }
+    } else {
+        // Remap through changes to handle duplicate points.
+        Triangulation::Changes changes = Triangulation::create_changes(pts_2d, dup_pts);
+        for (const auto &ring : rings) {
+            for (uint32_t i = 0; i < ring.count; ++i) {
+                uint32_t a = changes[ring.start + i];
+                uint32_t b = changes[ring.start + ((i + 1) % ring.count)];
+                if (a != b)  // skip degenerate edges from merged duplicates
+                    half_edges.push_back({a, b});
+            }
+        }
+    }
+
+    // Sort lexicographically as required by Triangulation::triangulate.
+    std::sort(half_edges.begin(), half_edges.end());
+    // Remove exact duplicates (shouldn't happen, but defensive).
+    half_edges.erase(std::unique(half_edges.begin(), half_edges.end()), half_edges.end());
+
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] CDT input: " << n_all << " points, "
+        << half_edges.size() << " constraint edges";
+
+    // ── Step 5: Triangulate with CDT ────────────────────────────────────
+    Triangulation::Indices cap_tris;
+    if (dup_pts.empty()) {
+        cap_tris = Triangulation::triangulate(pts_2d, half_edges);
+    } else {
+        // Build deduplicated point set for CDT.
+        Triangulation::Changes changes = Triangulation::create_changes(pts_2d, dup_pts);
+        uint32_t n_unique = *std::max_element(changes.begin(), changes.end()) + 1;
+        Points pts_unique(n_unique);
+        for (uint32_t i = 0; i < n_all; ++i)
+            pts_unique[changes[i]] = pts_2d[i];
+        cap_tris = Triangulation::triangulate(pts_unique, half_edges);
+        // Remap triangle indices back to original (pick any representative).
+        // Build reverse map: unique_idx -> first original_idx
+        std::vector<uint32_t> rev_changes(n_unique, 0);
+        for (uint32_t i = 0; i < n_all; ++i) {
+            // First occurrence wins (the one we stored the point from).
+            // Since create_changes maps later dupes to earlier indices,
+            // we want the original index that maps to each unique index.
+            rev_changes[changes[i]] = i;
+        }
+        for (auto &tri : cap_tris) {
+            tri[0] = rev_changes[tri[0]];
+            tri[1] = rev_changes[tri[1]];
+            tri[2] = rev_changes[tri[2]];
+        }
+    }
+
+    int num_cap_tris = (int)cap_tris.size();
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] CDT produced " << num_cap_tris << " triangles";
     if (num_cap_tris == 0)
         return TriangleMesh();
 
-    // ── Step 3: Build the full plug mesh ────────────────────────────────
-    // Side-wall quads are emitted by emit_side_wall_quads() which
-    // Z-subdivides edges to avoid slicer zigzag artifacts.  Cap
-    // triangles come from the tessellated 2D ExPolygon.
+    // ── Step 6: Build the full plug mesh ────────────────────────────────
+    // Vertex layout:
+    //   [0, n_all)       = front face vertices (pts_3d_front)
+    //   [n_all, 2*n_all) = back face vertices  (pts_3d_back)
+    // Cap and side-wall triangles share these vertex indices directly.
 
-    std::vector<Vec3f> vertices;
+    std::vector<Vec3f>   vertices(2 * n_all);
     std::vector<Vec3i32> faces;
+    faces.reserve(2 * num_cap_tris + 4 * n_all);  // caps + sidewalls estimate
 
-    // ── 3c: Side walls for outer boundary ──
-    // Each boundary edge is Z-subdivided by emit_side_wall_quads.
-    int total_side_tris = 0;
-    for (int i = 0; i < n; ++i) {
-        int i_next = (i + 1) % n;
-        size_t before = faces.size();
-        emit_side_wall_quads(loop[i], loop[i_next], offset,
-                             /*reverse_winding=*/!outer_is_ccw, vertices, faces);
-        total_side_tris += (int)(faces.size() - before);
+    for (uint32_t i = 0; i < n_all; ++i) {
+        vertices[i]          = pts_3d_front[i];
+        vertices[n_all + i]  = pts_3d_back[i];
     }
 
-    // ── 3c-2: Side walls for inner loops (island holes) ──
-    // Inner holes are canonicalised to CW by the ExPolygon builder.
-    // If the original inner loop was already CW, side walls match as-is
-    // (reverse_winding=true for "inward-facing" normals).
-    // If it was CCW, the canonicalisation flipped it, so side walls
-    // must NOT reverse (the flip already matches).
-    for (size_t idx = 0; idx < boundary.inner_loops.size(); ++idx) {
-        const auto &inner = boundary.inner_loops[idx];
-        int in_n = (int)inner.size();
-        if (in_n < 3) continue;
-
-        // The cap tessellation canonicalises inner holes to CW.  Side walls must
-        // produce the REVERSE edge direction at the cap junction for manifold edges.
-        // Original CW  -> no flip during canonicalisation -> side wall raw order
-        //   matches cap -> side walls need normal winding (reverse=false).
-        // Original CCW -> flipped to CW -> cap boundary reversed relative to raw
-        //   loop -> side walls must reverse to match (reverse=true).
-        bool reverse = (idx < inner_is_ccw.size()) ? inner_is_ccw[idx] : true;
-        for (int i = 0; i < in_n; ++i) {
-            int i_next = (i + 1) % in_n;
-            emit_side_wall_quads(inner[i], inner[i_next], offset,
-                                 /*reverse_winding=*/reverse, vertices, faces);
-        }
+    // ── 6a: Front cap ──
+    // CDT triangles index into pts_2d[0..n_all-1] which maps 1:1 to
+    // pts_3d_front.  Front cap normal points along +normal (outward).
+    // CDT with CCW outer ring produces CCW triangles viewed from +normal.
+    for (const auto &tri : cap_tris) {
+        faces.push_back(Vec3i32(tri[0], tri[1], tri[2]));
     }
 
-    BOOST_LOG_TRIVIAL(debug) << "[PlugGen] Side walls: " << total_side_tris
-        << " triangles (Z-step=" << SIDE_WALL_Z_STEP << "mm)";
-
-    // ── Collect all boundary vertices for snapping ──
-    // The 2D→3D round-trip through integer-scaled Slic3r coordinates
-    // introduces floating-point drift. Cap vertices that sit on the
-    // boundary won't exactly match side-wall vertices, leaving gaps
-    // in the mesh. We snap cap vertices to the nearest boundary vertex
-    // within a tight tolerance so its_merge_vertices (exact equality)
-    // can weld them.
-    // Use the original loop corners plus all Z-subdivision intermediates
-    // so every cap boundary vertex AND fan vertex can snap.
-    std::vector<Vec3f> boundary_pts_front;  // front face positions
-    std::vector<Vec3f> boundary_pts_back;   // back face positions
-    boundary_pts_front.reserve(n * 32 + 16);
-    boundary_pts_back.reserve(n * 32 + 16);
-    for (int i = 0; i < n; ++i) {
-        boundary_pts_front.push_back(loop[i]);
-        boundary_pts_back.push_back(loop[i] + offset);
-        for (const Vec3f &sp : subdiv_pts[i]) {
-            boundary_pts_front.push_back(sp);
-            boundary_pts_back.push_back(sp + offset);
-        }
-    }
-    for (const auto &inner : boundary.inner_loops) {
-        for (const Vec3f &pt : inner) {
-            boundary_pts_front.push_back(pt);
-            boundary_pts_back.push_back(pt + offset);
-        }
+    // ── 6b: Back cap ──
+    // Same triangles but shifted to back-face indices and reversed winding.
+    for (const auto &tri : cap_tris) {
+        faces.push_back(Vec3i32(
+            (int)n_all + tri[0],
+            (int)n_all + tri[2],   // reversed winding
+            (int)n_all + tri[1]));
     }
 
-    // Snap helper: if pt is within tolerance of any boundary vertex,
-    // replace it with the exact boundary vertex.
-    const float snap_tol_sq = 0.001f * 0.001f;  // 1 µm tolerance
-    auto snap_to_boundary = [&](Vec3f &pt, const std::vector<Vec3f> &bpts) {
-        for (const Vec3f &bp : bpts) {
-            if ((pt - bp).squaredNorm() < snap_tol_sq) {
-                pt = bp;
-                return;
-            }
-        }
-    };
-
-    // ── 3d/3e: Cap triangles with fan-stitching ──
-    // Each cap triangle from the tessellator is checked for boundary edges.
-    // If a boundary edge has Z-subdivision intermediates, the cap triangle
-    // is replaced by a fan of smaller triangles from the opposite vertex
-    // through the subdivision points.  This ensures the cap's boundary
-    // edges exactly match the finer side-wall segmentation.
+    // ── 6c: Side walls ──
+    // For each consecutive pair of ring vertices, emit a quad (two triangles).
+    // The quad connects front[i]→front[j]→back[j]→back[i].
     //
-    // Boundary edge detection: an edge (P, Q) is a boundary edge if both
-    // P and Q snap to consecutive boundary-ring vertices loop[i] and
-    // loop[(i+1)%n].  We build a lookup from (snapped) boundary vertex
-    // pairs to the corresponding subdivision-point list.
+    // For a CCW outer ring viewed from +normal:
+    //   Cap front edge direction: i → j (CCW)
+    //   Side wall must share edge j → i (reverse) to be manifold
+    //   So side-wall triangles (front face outward): (j, i, n_all+i), (j, n_all+i, n_all+j)
+    //   This makes the side-wall outward normal point away from the plug center.
+    //
+    // For CW inner rings:
+    //   Cap front edge direction: i → j (CW)
+    //   Side wall must share edge j → i (reverse) — same pattern works!
+    //   The outward normal of inner side walls points inward toward the hole,
+    //   which is correct (the hole faces inward).
 
-    // Build lookup: boundary vertex pair → subdivision intermediates.
-    // Key: (front_a, front_b) as 3D positions of consecutive ring verts.
-    // We'll match snapped cap vertices against this.
-    struct BoundaryEdge {
-        Vec3f a, b;                // front positions of the two corners
-        std::vector<Vec3f> intermediates;  // Z-subdivision points between a and b
-    };
-    std::vector<BoundaryEdge> outer_boundary_edges;
-    outer_boundary_edges.reserve(n);
-    for (int i = 0; i < n; ++i) {
-        BoundaryEdge be;
-        be.a = loop[i];
-        be.b = loop[(i + 1) % n];
-        be.intermediates = subdiv_pts[i];  // may be empty
-        outer_boundary_edges.push_back(std::move(be));
+    for (const auto &ring : rings) {
+        for (uint32_t i = 0; i < ring.count; ++i) {
+            uint32_t fi = ring.start + i;
+            uint32_t fj = ring.start + ((i + 1) % ring.count);
+            uint32_t bi = n_all + fi;
+            uint32_t bj = n_all + fj;
+
+            // Two triangles forming a quad.
+            // Front-face of side wall: normal pointing outward from plug.
+            faces.push_back(Vec3i32((int)fj, (int)fi, (int)bi));
+            faces.push_back(Vec3i32((int)fj, (int)bi, (int)bj));
+        }
     }
-    // Also add inner-loop boundary edges (no Z-subdivision for inner loops
-    // since they typically have small dZ, but include for completeness).
-    // Inner-loop edges currently have no Z-subdivision, so intermediates
-    // will always be empty.
 
-    // Helper: find if two 3D points match a boundary edge (within snap tol)
-    // and return the intermediates if found.  Also checks the reversed
-    // direction (since the tessellator may reverse polygon winding).
-    // `reversed_out` is set to true when the match is in reverse order.
-    auto find_boundary_intermediates = [&](const Vec3f &pa, const Vec3f &pb,
-                                           bool &reversed_out)
-        -> const std::vector<Vec3f>* {
-        for (const auto &be : outer_boundary_edges) {
-            if ((pa - be.a).squaredNorm() < snap_tol_sq &&
-                (pb - be.b).squaredNorm() < snap_tol_sq) {
-                reversed_out = false;
-                return &be.intermediates;
-            }
-            if ((pa - be.b).squaredNorm() < snap_tol_sq &&
-                (pb - be.a).squaredNorm() < snap_tol_sq) {
-                reversed_out = true;
-                return &be.intermediates;
-            }
-        }
-        return nullptr;
-    };
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Mesh built: "
+        << vertices.size() << " verts, " << faces.size() << " faces"
+        << " (normal=" << normal.x() << "," << normal.y() << "," << normal.z() << ")";
 
-    // Emit cap triangles for one face (front or back).
-    // For each tessellated triangle, check all 3 edges for boundary-edge
-    // matches with non-empty intermediates.  If found, replace the triangle
-    // with a fan through the subdivision points.
-    auto emit_cap_tris = [&](
-        const std::vector<Vec3f> &bpts,   // snap targets
-        const Vec3f &face_offset,         // Vec3f(0,0,0) for front, offset for back
-        bool reverse_winding)             // true for back cap
-    {
-        for (int t = 0; t < num_cap_tris; ++t) {
-            Vec3f v0 = unproject_to_3d(tri_pts_2d[t*3+0], origin, u, v) + face_offset;
-            Vec3f v1 = unproject_to_3d(tri_pts_2d[t*3+1], origin, u, v) + face_offset;
-            Vec3f v2 = unproject_to_3d(tri_pts_2d[t*3+2], origin, u, v) + face_offset;
-            snap_to_boundary(v0, bpts);
-            snap_to_boundary(v1, bpts);
-            snap_to_boundary(v2, bpts);
-
-            // Check each of the 3 edges for boundary intermediates.
-            // verts[e] → verts[(e+1)%3], opposite = verts[(e+2)%3].
-            Vec3f tri[3] = {v0, v1, v2};
-            int fan_edge = -1;  // which edge (0,1,2) has intermediates
-            const std::vector<Vec3f> *intermediates = nullptr;
-            bool edge_reversed = false;  // true if cap edge is reversed vs stored
-
-            for (int e = 0; e < 3; ++e) {
-                const Vec3f &ea = tri[e];
-                const Vec3f &eb = tri[(e + 1) % 3];
-                bool rev = false;
-                auto *mid = find_boundary_intermediates(ea, eb, rev);
-                if (mid && !mid->empty()) {
-                    fan_edge = e;
-                    intermediates = mid;
-                    edge_reversed = rev;
-                    break;  // handle one subdivided edge per triangle
-                }
-            }
-
-            if (fan_edge < 0) {
-                // No subdivided boundary edge — emit original triangle.
-                int base = (int)vertices.size();
-                vertices.push_back(v0);
-                vertices.push_back(v1);
-                vertices.push_back(v2);
-                if (!reverse_winding)
-                    faces.push_back(Vec3i32(base, base+1, base+2));
-                else
-                    faces.push_back(Vec3i32(base, base+2, base+1));
-            } else {
-                // Replace triangle with fan from opposite vertex through
-                // subdivision points along the boundary edge.
-                const Vec3f &ea = tri[fan_edge];
-                const Vec3f &eb = tri[(fan_edge + 1) % 3];
-                const Vec3f &opp = tri[(fan_edge + 2) % 3];
-
-                // Build the full chain along the boundary edge in the
-                // same direction as the cap traversal (ea → eb).
-                // If edge_reversed, intermediates are stored A→B but
-                // the cap traverses B→A, so we reverse the intermediates.
-                std::vector<Vec3f> chain;
-                chain.reserve(intermediates->size() + 2);
-                chain.push_back(ea);
-                if (!edge_reversed) {
-                    for (const Vec3f &mp : *intermediates)
-                        chain.push_back(mp + face_offset);
-                } else {
-                    for (int mi = (int)intermediates->size() - 1; mi >= 0; --mi)
-                        chain.push_back((*intermediates)[mi] + face_offset);
-                }
-                chain.push_back(eb);
-
-                for (size_t ci = 0; ci + 1 < chain.size(); ++ci) {
-                    int base = (int)vertices.size();
-                    vertices.push_back(opp);
-                    vertices.push_back(chain[ci]);
-                    vertices.push_back(chain[ci + 1]);
-                    if (!reverse_winding)
-                        faces.push_back(Vec3i32(base, base+1, base+2));
-                    else
-                        faces.push_back(Vec3i32(base, base+2, base+1));
-                }
-            }
-        }
-    };
-
-    // Front cap: snap to front boundary, no offset, normal winding.
-    emit_cap_tris(boundary_pts_front, Vec3f(0, 0, 0), /*reverse_winding=*/false);
-
-    // Back cap: snap to back boundary, offset applied, reversed winding.
-    emit_cap_tris(boundary_pts_back, offset, /*reverse_winding=*/true);
-
-    // ── Step 4: Build TriangleMesh ──────────────────────────────────────
+    // ── Step 7: Build TriangleMesh ──────────────────────────────────────
     indexed_triangle_set its;
     its.vertices = std::move(vertices);
     its.indices  = std::move(faces);
 
-    // Merge duplicate vertices to clean up the mesh.
+    // Merge duplicate vertices — should only collapse ring start/end
+    // junctions since all other vertices are shared by index.
     int pre_merge_verts = (int)its.vertices.size();
     int pre_merge_faces = (int)its.indices.size();
     its_merge_vertices(its);
