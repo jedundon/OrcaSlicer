@@ -142,6 +142,7 @@ private:
     bool is_batch_selection() const;
 
     // Batch actions
+    void perform_batch_fill(const Vec2d& mouse_position);
     void enter_batch_preview(const Vec2d& mouse_position);
     void discover_batch_matches();
     void commit_batch();

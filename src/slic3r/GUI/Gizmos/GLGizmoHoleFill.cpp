@@ -108,9 +108,9 @@ void GLGizmoHoleFill::data_changed(bool /*is_serializing*/)
     init_extruders_data();
     reset_hover_state();
     m_multi_raycasters.clear();
-    // A selection change mid-preview would desync the batch state; abandon it.
-    if (m_batch_state == BatchState::Preview)
-        cancel_batch();
+    // A selection change mid-batch would desync state; clear it.
+    clear_batch_preview();
+    m_batch_state = BatchState::Inactive;
 }
 
 void GLGizmoHoleFill::init_extruders_data()
@@ -356,9 +356,6 @@ bool GLGizmoHoleFill::on_mouse(const wxMouseEvent& mouse_event)
 
     if (mouse_event.LeftDown()) {
         const Vec2d mp(mouse_event.GetX(), mouse_event.GetY());
-        // In batch preview, clicks are handled by the ImGui Apply/Cancel buttons.
-        if (m_batch_state == BatchState::Preview)
-            return true;
         update_hover(mp);
         if (m_hover_is_plug) {
             if (mouse_event.ShiftDown())
@@ -368,7 +365,7 @@ bool GLGizmoHoleFill::on_mouse(const wxMouseEvent& mouse_event)
         } else if (mouse_event.ShiftDown())
             perform_fill_all_on_surface(mp);
         else if (is_batch_selection())
-            enter_batch_preview(mp);
+            perform_batch_fill(mp);
         else
             perform_hole_fill(mp);
         reset_hover_state();  // W3: clear stale hover after fill/remove
@@ -832,6 +829,191 @@ void GLGizmoHoleFill::perform_remove_all_on_surface(const Vec2d& /*mouse_positio
         NotificationType::CustomNotification,
         NotificationManager::NotificationLevel::RegularNotificationLevel,
         Slic3r::GUI::format(_L("Removed %1% hole fill(s) from surface."), removed));
+}
+
+void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
+{
+    // Instant batch fill: discover matches + generate plugs in one shot.
+    // Stays in Inactive state so the gizmo remains open for the next click.
+    RaycastResult rr;
+    const bool multi = is_batch_selection();
+    bool hit = multi ? pick_mesh_multi(mouse_position, rr)
+                     : pick_mesh(mouse_position, rr);
+    if (!hit)
+        return;
+
+    const Selection& selection = m_parent.get_selection();
+
+    // Resolve the ModelObject for the hit.
+    const ModelObject* mo = nullptr;
+    int object_idx = -1;
+    int inst_idx   = -1;
+    if (multi && rr.object_idx >= 0) {
+        const Model* model = selection.get_model();
+        if (model && rr.object_idx < (int)model->objects.size()) {
+            mo = model->objects[rr.object_idx];
+            object_idx = rr.object_idx;
+            inst_idx   = rr.instance_idx;
+        }
+    } else {
+        mo = m_c->selection_info()->model_object();
+        object_idx = selection.get_object_idx();
+        inst_idx   = selection.get_instance_idx();
+    }
+    if (!mo || object_idx < 0)
+        return;
+
+    // Map mesh_id (model-part index) back to a ModelVolume.
+    int model_part_idx = 0;
+    int hit_volume_raw_idx = -1;
+    for (int vi = 0; vi < (int)mo->volumes.size(); ++vi) {
+        if (!mo->volumes[vi]->is_model_part())
+            continue;
+        if (model_part_idx == rr.mesh_id) {
+            hit_volume_raw_idx = vi;
+            break;
+        }
+        ++model_part_idx;
+    }
+    if (hit_volume_raw_idx < 0)
+        return;
+
+    // Ignore clicks on existing plugs.
+    const ModelVolume* vol = mo->volumes[hit_volume_raw_idx];
+    if (vol->name.rfind("HoleFill_", 0) == 0)
+        return;
+
+    const auto& its = vol->mesh().its;
+    if (rr.facet < 0 || rr.facet >= (int)its.indices.size())
+        return;
+
+    // Capture reference info for discover_batch_matches.
+    m_batch_ref_object_idx = object_idx;
+    m_batch_ref_volume_idx = hit_volume_raw_idx;
+    m_batch_ref_facet      = rr.facet;
+
+    const auto& tri = its.indices[rr.facet];
+    Vec3f v0 = its.vertices[tri[0]];
+    Vec3f v1 = its.vertices[tri[1]];
+    Vec3f v2 = its.vertices[tri[2]];
+    Vec3f local_n = (v1 - v0).cross(v2 - v0).normalized();
+
+    if (inst_idx < 0) inst_idx = 0;
+    if (inst_idx >= (int)mo->instances.size())
+        return;
+    Transform3d trafo = mo->instances[inst_idx]->get_transformation().get_matrix() * vol->get_matrix();
+    m_batch_ref_world_normal = (trafo.linear().inverse().transpose().cast<float>() * local_n).normalized();
+
+    // Phase 1: discover all matching holes across selected objects.
+    m_batch_preview.clear();
+    discover_batch_matches();
+
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] perform_batch_fill: discovered " << m_batch_preview.size() << " holes";
+
+    if (m_batch_preview.empty()) {
+        clear_batch_preview();
+        wxGetApp().plater()->get_notification_manager()->push_notification(
+            NotificationType::CustomNotification,
+            NotificationManager::NotificationLevel::RegularNotificationLevel,
+            _u8L("No matching holes found across selected objects."));
+        m_parent.set_as_dirty();
+        return;
+    }
+
+    // Phase 2: generate plugs immediately (same logic as commit_batch).
+    const bool is_cut = (m_mode == Mode::Cut);
+    const ModelVolumeType new_type = is_cut ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART;
+    const std::string name_prefix  = is_cut ? "HoleFill_neg_" : "HoleFill_";
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(),
+        Slic3r::GUI::format("Batch hole fill (%1% plugs)", (int)m_batch_preview.size()));
+
+    int filled = 0, skipped = 0, failed = 0;
+    std::set<int> touched_objects;
+
+    // Per-object cache of existing same-kind plug centers for duplicate rejection.
+    std::map<int, std::vector<Vec3d>> existing_centers_by_obj;
+    auto get_existing_centers = [&](int obj_idx) -> std::vector<Vec3d>& {
+        auto it = existing_centers_by_obj.find(obj_idx);
+        if (it != existing_centers_by_obj.end())
+            return it->second;
+        std::vector<Vec3d>& centers = existing_centers_by_obj[obj_idx];
+        const ModelObject* m = wxGetApp().model().objects[obj_idx];
+        for (const ModelVolume* v : m->volumes) {
+            if (v->name.rfind("HoleFill_", 0) != 0)
+                continue;
+            const bool v_is_neg = v->name.rfind("HoleFill_neg_", 0) == 0;
+            if (v_is_neg != is_cut)
+                continue;
+            centers.push_back(v->mesh().bounding_box().center());
+        }
+        return centers;
+    };
+
+    for (const auto& entry : m_batch_preview) {
+        if (entry.object_idx < 0 || entry.object_idx >= (int)wxGetApp().model().objects.size())
+            continue;
+        ModelObject* mo_mut = wxGetApp().model().objects[entry.object_idx];
+        if (!mo_mut)
+            continue;
+        if (entry.volume_idx < 0 || entry.volume_idx >= (int)mo_mut->volumes.size())
+            continue;
+        const ModelVolume* src_vol = mo_mut->volumes[entry.volume_idx];
+        if (!src_vol)
+            continue;
+
+        TriangleMesh plug = generate_plug(entry.boundary, m_depth);
+        if (plug.empty()) {
+            ++failed;
+            continue;
+        }
+
+        const Vec3d plug_center = plug.bounding_box().center();
+        std::vector<Vec3d>& existing_centers = get_existing_centers(entry.object_idx);
+        bool dupe = false;
+        for (const Vec3d& ec : existing_centers) {
+            if ((plug_center - ec).norm() < 0.1) {
+                dupe = true;
+                break;
+            }
+        }
+        if (dupe) {
+            ++skipped;
+            continue;
+        }
+
+        const Geometry::Transformation source_trafo = src_vol->get_transformation();
+        ModelVolume* new_vol = mo_mut->add_volume(std::move(plug), new_type, false);
+        new_vol->set_new_unique_id();
+        new_vol->name = name_prefix + std::to_string(entry.volume_idx)
+                        + "_f" + std::to_string(entry.seed_facet)
+                        + "_b" + std::to_string(filled);
+        if (!is_cut)
+            new_vol->config.set("extruder", (int)m_selected_extruder_idx + 1);
+        new_vol->set_transformation(source_trafo);
+
+        existing_centers.push_back(plug_center);
+        touched_objects.insert(entry.object_idx);
+        ++filled;
+    }
+
+    wxGetApp().plater()->update();
+    for (int oi : touched_objects)
+        wxGetApp().obj_list()->update_info_items((size_t)oi);
+
+    std::string msg = Slic3r::GUI::format(_L("Batch fill: %1% plugs added"), filled);
+    if (skipped > 0)
+        msg += Slic3r::GUI::format(_L(", %1% skipped (duplicates)"), skipped);
+    if (failed > 0)
+        msg += Slic3r::GUI::format(_L(", %1% failed"), failed);
+    wxGetApp().plater()->get_notification_manager()->push_notification(
+        NotificationType::CustomNotification,
+        NotificationManager::NotificationLevel::RegularNotificationLevel,
+        msg);
+
+    // Stay in Inactive state — gizmo remains open for next click.
+    clear_batch_preview();
+    m_parent.set_as_dirty();
 }
 
 void GLGizmoHoleFill::enter_batch_preview(const Vec2d& mouse_position)
@@ -1578,54 +1760,26 @@ void GLGizmoHoleFill::on_render_input_window(float x, float y, float bottom_limi
             Slic3r::GUI::format(_L("Batch mode: %1% objects selected"), n_obj));
         ImGui::Separator();
 
-        if (m_batch_state == BatchState::Preview) {
-            m_imgui->text(Slic3r::GUI::format(_L("Preview: %1% holes found"), (int)m_batch_preview.size()));
-            ImGui::Separator();
-
-            int scope_idx = (int)m_batch_scope;
-            // Keep the array static so the pointer we pass to ImGui::Combo stays valid
-            // across the call; re-assign each frame in case the locale changed.
-            static std::array<std::string, 3> scope_labels;
-            scope_labels = {
-                _u8L("All faces"), _u8L("Matching normal"), _u8L("Single surface")
-            };
-            if (ImGui::Combo("##batch_scope", &scope_idx,
-                    [](void* data, int idx, const char** out) {
-                        auto* labels = static_cast<std::array<std::string, 3>*>(data);
-                        *out = (*labels)[idx].c_str();
-                        return true;
-                    },
-                    &scope_labels, 3)) {
-                m_batch_scope = static_cast<BatchScope>(scope_idx);
-                discover_batch_matches();
-            }
-
-            bool prev_all_instances = m_batch_all_instances;
-            ImGui::Checkbox(_u8L("All instances of each object").c_str(), &m_batch_all_instances);
-            if (m_batch_all_instances != prev_all_instances)
-                discover_batch_matches();
-
-            ImGui::Separator();
-
-            if (m_imgui->button(_L("Apply")))
-                commit_batch();
-            ImGui::SameLine();
-            if (m_imgui->button(_L("Re-pick")))
-                cancel_batch();
-            ImGui::SameLine();
-            if (m_imgui->button(_L("Cancel")))
-                cancel_batch();
-
-            // Allow ESC to cancel the preview without exiting the gizmo.
-            if (ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape)))
-                cancel_batch();
-        } else if (m_batch_state == BatchState::Summary) {
-            m_imgui->text(_L("Batch complete."));
-            if (m_imgui->button(_L("Pick again")))
-                cancel_batch();
-        } else {
-            m_imgui->text(_L("Click a hole to set the reference."));
+        // Scope dropdown — controls which faces are matched.
+        int scope_idx = (int)m_batch_scope;
+        static std::array<std::string, 3> scope_labels;
+        scope_labels = {
+            _u8L("All faces"), _u8L("Matching normal"), _u8L("Single surface")
+        };
+        if (ImGui::Combo("##batch_scope", &scope_idx,
+                [](void* data, int idx, const char** out) {
+                    auto* labels = static_cast<std::array<std::string, 3>*>(data);
+                    *out = (*labels)[idx].c_str();
+                    return true;
+                },
+                &scope_labels, 3)) {
+            m_batch_scope = static_cast<BatchScope>(scope_idx);
         }
+
+        ImGui::Checkbox(_u8L("All instances of each object").c_str(), &m_batch_all_instances);
+
+        ImGui::Separator();
+        m_imgui->text(_L("Click a hole to fill matching holes across all objects."));
 
         ImGui::Separator();
     }
