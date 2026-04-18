@@ -198,6 +198,7 @@ bool GLGizmoHoleFill::on_mouse(const wxMouseEvent& mouse_event)
         const Vec2d mp(mouse_event.GetX(), mouse_event.GetY());
         update_hover(mp);
         perform_hole_fill(mp);
+        reset_hover_state();  // W3: clear stale hover after fill
         return true;
     }
 
@@ -226,13 +227,15 @@ void GLGizmoHoleFill::perform_hole_fill(const Vec2d& mouse_position)
     if (object_idx < 0)
         return;
 
-    if (m_rr.mesh_id < 0) {
+    // W4: re-pick in case raycaster rebuilt since hover (e.g. prior fill added a volume)
+    if (m_rr.mesh_id < 0 && !pick_mesh(mouse_position, m_rr)) {
         wxGetApp().plater()->get_notification_manager()->push_notification(
             NotificationType::CustomNotification,
             NotificationManager::NotificationLevel::RegularNotificationLevel,
             _u8L("No surface detected under cursor."));
         return;
     }
+    if (m_rr.mesh_id < 0) {
 
     // m_rr.mesh_id is the index into model-part volumes. Map it back to the ModelVolume.
     int model_part_idx = 0;
@@ -472,7 +475,10 @@ void GLGizmoHoleFill::render_hole_fill_hover()
         return;
 
     // Render using the volume's world transform.
-    const ModelInstance* mi = mo->instances[selection.get_instance_idx()];
+    // W1 fix: guard against invalid instance index
+    int inst_idx = selection.get_instance_idx();
+    if (inst_idx < 0 || inst_idx >= int(mo->instances.size())) { m_hover_hole_valid = false; return; }
+    const ModelInstance* mi = mo->instances[inst_idx];
     Transform3d model_trafo = mi->get_transformation().get_matrix() * hit_volume->get_matrix();
     const Camera& camera = wxGetApp().plater()->get_camera();
     Transform3d view_model_matrix = camera.get_view_matrix() * model_trafo;
@@ -568,6 +574,7 @@ void GLGizmoHoleFill::on_render_input_window(float x, float y, float bottom_limi
     ImGui::SameLine(drag_left_width + label_left_width);
     ImGui::PushItemWidth(1.5f * slider_icon_width);
     ImGui::BBLDragFloat("##hole_fill_angle_input", &m_angle_tolerance, 0.05f, 0.0f, 0.0f, "%.1f");
+    m_angle_tolerance = std::clamp(m_angle_tolerance, 1.0f, 30.0f);
 
     ImGui::Separator();
 
@@ -598,9 +605,10 @@ void GLGizmoHoleFill::on_render_input_window(float x, float y, float bottom_limi
     ImGui::Separator();
 
     // Apply / Cancel (stubs — wired up in a later step).
-    if (m_imgui->button(m_desc.at("apply"))) {
-        // Stubbed: no pending list yet; left-click currently applies immediately.
-    }
+    // Apply is disabled until pending-plug workflow is implemented (step 5).
+    m_imgui->disabled_begin(true);
+    m_imgui->button(m_desc.at("apply"));
+    m_imgui->disabled_end();
     ImGui::SameLine();
     if (m_imgui->button(m_desc.at("cancel"))) {
         reset_hover_state();

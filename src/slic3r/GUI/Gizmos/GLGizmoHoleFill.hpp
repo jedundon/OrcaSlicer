@@ -24,9 +24,9 @@ public:
     void data_changed(bool is_serializing) override;
 
     bool wants_enter_leave_snapshots() const override { return true; }
-    std::string get_gizmo_entering_text() const override { return "Entering Hole Fill"; }
-    std::string get_gizmo_leaving_text() const override  { return "Leaving Hole Fill"; }
-    std::string get_action_snapshot_name() const override { return "Hole fill editing"; }
+    std::string get_gizmo_entering_text() const override { return _u8L("Entering Hole Fill"); }
+    std::string get_gizmo_leaving_text() const override  { return _u8L("Leaving Hole Fill"); }
+    std::string get_action_snapshot_name() const override { return _u8L("Hole fill editing"); }
 
 protected:
     bool on_init() override;
