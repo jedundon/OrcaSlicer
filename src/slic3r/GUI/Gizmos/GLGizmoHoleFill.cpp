@@ -379,7 +379,7 @@ void GLGizmoHoleFill::perform_hole_fill(const Vec2d& mouse_position)
     new_vol->set_transformation(source_trafo);
 
     wxGetApp().plater()->update();
-    wxGetApp().obj_list()->update_after_undo_redo();
+    wxGetApp().obj_list()->update_info_items((size_t)object_idx);
 
     wxGetApp().plater()->get_notification_manager()->push_notification(
         NotificationType::CustomNotification,
@@ -419,7 +419,7 @@ void GLGizmoHoleFill::perform_hole_remove()
     mo_mut->delete_volume((size_t)m_hover_plug_raw_idx);
 
     wxGetApp().plater()->update();
-    wxGetApp().obj_list()->update_after_undo_redo();
+    wxGetApp().obj_list()->update_info_items((size_t)object_idx);
 
     wxGetApp().plater()->get_notification_manager()->push_notification(
         NotificationType::CustomNotification,
@@ -549,7 +549,7 @@ void GLGizmoHoleFill::perform_fill_all_on_surface(const Vec2d& mouse_position)
     }
 
     wxGetApp().plater()->update();
-    wxGetApp().obj_list()->update_after_undo_redo();
+    wxGetApp().obj_list()->update_info_items((size_t)object_idx);
 
     std::string msg;
     if (filled > 0 && skipped > 0)
