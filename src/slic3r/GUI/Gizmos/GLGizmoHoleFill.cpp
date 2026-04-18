@@ -99,6 +99,10 @@ void GLGizmoHoleFill::reset_hover_state()
     m_hover_mesh_id    = -1;
     m_hover_outline_mesh.reset();
     m_hover_fill_mesh.reset();
+    m_hover_is_plug             = false;
+    m_hover_plug_raw_idx        = -1;
+    m_remove_outline_cached_idx = -1;
+    m_remove_outline_mesh.reset();
     m_rr = RaycastResult{};
 }
 
@@ -176,13 +180,39 @@ void GLGizmoHoleFill::update_hover(const Vec2d& mouse_position)
 {
     RaycastResult rr;
     if (!pick_mesh(mouse_position, rr)) {
-        m_hover_hole_valid = false;
-        m_hover_facet      = -1;
-        m_hover_mesh_id    = -1;
+        m_hover_hole_valid   = false;
+        m_hover_facet        = -1;
+        m_hover_mesh_id      = -1;
+        m_hover_is_plug      = false;
+        m_hover_plug_raw_idx = -1;
         m_rr = RaycastResult{};
         return;
     }
     m_rr = rr;
+
+    // Detect whether the hit is on an existing HoleFill_ plug volume.
+    // HoleFill_neg_ volumes are negatives and should not enter remove mode.
+    m_hover_is_plug      = false;
+    m_hover_plug_raw_idx = -1;
+    if (m_c && m_c->selection_info()) {
+        if (const ModelObject* mo = m_c->selection_info()->model_object()) {
+            int model_part_idx = 0;
+            for (int vi = 0; vi < (int)mo->volumes.size(); ++vi) {
+                const ModelVolume* mv = mo->volumes[vi];
+                if (!mv->is_model_part())
+                    continue;
+                if (model_part_idx == m_rr.mesh_id) {
+                    if (mv->name.rfind("HoleFill_", 0) == 0 &&
+                        mv->name.rfind("HoleFill_neg_", 0) != 0) {
+                        m_hover_is_plug      = true;
+                        m_hover_plug_raw_idx = vi;
+                    }
+                    break;
+                }
+                ++model_part_idx;
+            }
+        }
+    }
 }
 
 bool GLGizmoHoleFill::on_mouse(const wxMouseEvent& mouse_event)
@@ -197,8 +227,11 @@ bool GLGizmoHoleFill::on_mouse(const wxMouseEvent& mouse_event)
     if (mouse_event.LeftDown() && !mouse_event.ShiftDown()) {
         const Vec2d mp(mouse_event.GetX(), mouse_event.GetY());
         update_hover(mp);
-        perform_hole_fill(mp);
-        reset_hover_state();  // W3: clear stale hover after fill
+        if (m_hover_is_plug)
+            perform_hole_remove();
+        else
+            perform_hole_fill(mp);
+        reset_hover_state();  // W3: clear stale hover after fill/remove
         return true;
     }
 
@@ -235,7 +268,8 @@ void GLGizmoHoleFill::perform_hole_fill(const Vec2d& mouse_position)
             _u8L("No surface detected under cursor."));
         return;
     }
-    if (m_rr.mesh_id < 0) {
+    if (m_rr.mesh_id < 0)
+        return;
 
     // m_rr.mesh_id is the index into model-part volumes. Map it back to the ModelVolume.
     int model_part_idx = 0;
@@ -325,6 +359,126 @@ void GLGizmoHoleFill::perform_hole_fill(const Vec2d& mouse_position)
         NotificationType::CustomNotification,
         NotificationManager::NotificationLevel::RegularNotificationLevel,
         _u8L("Hole filled successfully! A new volume has been added with the selected filament."));
+}
+
+void GLGizmoHoleFill::perform_hole_remove()
+{
+    const Selection& selection = m_parent.get_selection();
+    if (selection.is_empty())
+        return;
+
+    const ModelObject* mo = m_c->selection_info()->model_object();
+    if (!mo)
+        return;
+
+    int object_idx = selection.get_object_idx();
+    if (object_idx < 0)
+        return;
+
+    if (m_hover_plug_raw_idx < 0 || m_hover_plug_raw_idx >= (int)mo->volumes.size())
+        return;
+
+    // Re-validate that the resolved volume is still a fill plug. Indices can
+    // shift between hover and click if the model was edited elsewhere.
+    const ModelVolume* vol = mo->volumes[m_hover_plug_raw_idx];
+    if (!vol
+        || vol->name.rfind("HoleFill_", 0) != 0
+        || vol->name.rfind("HoleFill_neg_", 0) == 0)
+        return;
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Remove hole fill");
+
+    ModelObject* mo_mut = wxGetApp().model().objects[object_idx];
+    mo_mut->delete_volume((size_t)m_hover_plug_raw_idx);
+
+    wxGetApp().plater()->update();
+    wxGetApp().obj_list()->update_after_undo_redo();
+
+    wxGetApp().plater()->get_notification_manager()->push_notification(
+        NotificationType::CustomNotification,
+        NotificationManager::NotificationLevel::RegularNotificationLevel,
+        _u8L("Hole fill removed."));
+}
+
+void GLGizmoHoleFill::render_remove_hover()
+{
+    if (!m_hover_is_plug || m_hover_plug_raw_idx < 0)
+        return;
+
+    const ModelObject* mo = m_c->selection_info()->model_object();
+    if (!mo || m_hover_plug_raw_idx >= (int)mo->volumes.size())
+        return;
+
+    const ModelVolume* hit_volume = mo->volumes[m_hover_plug_raw_idx];
+    if (!hit_volume)
+        return;
+
+    const Selection& selection = m_parent.get_selection();
+    int inst_idx = selection.get_instance_idx();
+    if (inst_idx < 0 || inst_idx >= int(mo->instances.size()))
+        return;
+
+    // Build a red wireframe of the plug's local AABB. Rebuild only when the
+    // hovered plug changes so we don't thrash the GLModel every frame.
+    if (m_hover_plug_raw_idx != m_remove_outline_cached_idx) {
+        m_remove_outline_cached_idx = m_hover_plug_raw_idx;
+        m_remove_outline_mesh.reset();
+
+        const BoundingBoxf3 bbox = hit_volume->mesh().bounding_box();
+        const Vec3f mn = bbox.min.cast<float>();
+        const Vec3f mx = bbox.max.cast<float>();
+
+        const Vec3f corners[8] = {
+            { mn.x(), mn.y(), mn.z() }, { mx.x(), mn.y(), mn.z() },
+            { mx.x(), mx.y(), mn.z() }, { mn.x(), mx.y(), mn.z() },
+            { mn.x(), mn.y(), mx.z() }, { mx.x(), mn.y(), mx.z() },
+            { mx.x(), mx.y(), mx.z() }, { mn.x(), mx.y(), mx.z() },
+        };
+        static const unsigned int edges[12][2] = {
+            {0,1},{1,2},{2,3},{3,0},
+            {4,5},{5,6},{6,7},{7,4},
+            {0,4},{1,5},{2,6},{3,7},
+        };
+
+        GLModel::Geometry init_data;
+        init_data.format = { GLModel::Geometry::EPrimitiveType::Lines,
+                             GLModel::Geometry::EVertexLayout::P3 };
+        init_data.color  = ColorRGBA(1.0f, 0.15f, 0.15f, 1.0f); // red
+        init_data.reserve_vertices(8);
+        init_data.reserve_indices(24);
+        for (int i = 0; i < 8; ++i)
+            init_data.add_vertex(corners[i]);
+        for (int i = 0; i < 12; ++i)
+            init_data.add_line(edges[i][0], edges[i][1]);
+
+        m_remove_outline_mesh.init_from(std::move(init_data));
+    }
+
+    const ModelInstance* mi = mo->instances[inst_idx];
+    Transform3d model_trafo = mi->get_transformation().get_matrix() * hit_volume->get_matrix();
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    Transform3d view_model_matrix = camera.get_view_matrix() * model_trafo;
+
+    glsafe(::glDisable(GL_DEPTH_TEST));
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glLineWidth(3.0f));
+#endif
+
+    auto shader = wxGetApp().get_shader("flat");
+    if (shader) {
+        shader->start_using();
+        shader->set_uniform("view_model_matrix", view_model_matrix);
+        shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+        m_remove_outline_mesh.render();
+        shader->stop_using();
+    }
+
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glLineWidth(1.0f));
+#endif
+    glsafe(::glEnable(GL_DEPTH_TEST));
 }
 
 void GLGizmoHoleFill::render_hole_fill_hover()
@@ -522,7 +676,10 @@ void GLGizmoHoleFill::render_hole_fill_hover()
 
 void GLGizmoHoleFill::on_render()
 {
-    render_hole_fill_hover();
+    if (m_hover_is_plug)
+        render_remove_hover();
+    else
+        render_hole_fill_hover();
 }
 
 void GLGizmoHoleFill::on_render_input_window(float x, float y, float bottom_limit)
@@ -544,6 +701,14 @@ void GLGizmoHoleFill::on_render_input_window(float x, float y, float bottom_limi
     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
     GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always);
     GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+
+    // Mode indicator: fill by default, remove when hovering over an existing plug.
+    if (m_hover_is_plug)
+        ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.25f, 1.0f),
+                           "%s", _u8L("Mode: Remove (click to delete)").c_str());
+    else
+        m_imgui->text(_u8L("Mode: Fill"));
+    ImGui::Separator();
 
     const float slider_icon_width = m_imgui->get_slider_icon_size().x;
     const float sliders_width     = m_imgui->scaled(7.0f);

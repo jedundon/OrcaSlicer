@@ -54,6 +54,14 @@ private:
     GLModel      m_hover_outline_mesh;
     GLModel      m_hover_fill_mesh;
 
+    // Remove-mode hover state: set when the cursor is over an existing
+    // HoleFill_ plug volume. In that case we show a red outline and left
+    // click removes the plug instead of filling.
+    bool    m_hover_is_plug        = false;
+    int     m_hover_plug_raw_idx   = -1;  // index into ModelObject::volumes
+    int     m_remove_outline_cached_idx = -1;
+    GLModel m_remove_outline_mesh;
+
     // Last raycast hit (populated from on_mouse Motion events).
     // Mirrors GLGizmoPainterBase::m_rr for the subset of fields we use.
     struct RaycastResult {
@@ -73,7 +81,9 @@ private:
     // Helpers
     void update_hover(const Vec2d& mouse_position);
     void perform_hole_fill(const Vec2d& mouse_position);
+    void perform_hole_remove();
     void render_hole_fill_hover();
+    void render_remove_hover();
     bool pick_mesh(const Vec2d& mouse_position, RaycastResult& out) const;
     void reset_hover_state();
     void init_extruders_data();
