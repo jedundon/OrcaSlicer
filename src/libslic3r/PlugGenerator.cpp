@@ -360,24 +360,6 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
         << degenerate_faces << " degenerate"
         << " (normal=" << normal.x() << "," << normal.y() << "," << normal.z() << ")";
 
-    // Dump plug mesh to STL in user's temp directory for inspection.
-    {
-        static int plug_id = 0;
-        // Use USERPROFILE\Downloads on Windows, /tmp on Linux.
-        std::string tmp_dir;
-        const char *userprofile = std::getenv("USERPROFILE");
-        if (userprofile)
-            tmp_dir = std::string(userprofile) + "\\Downloads";
-        else
-            tmp_dir = "/tmp";
-        const char *tmp = tmp_dir.c_str();
-        std::string dump_path = std::string(tmp) + "/holefill_plug_" + std::to_string(plug_id++) + ".stl";
-        if (its_write_stl_ascii(dump_path.c_str(), "holefill_plug", its))
-            BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Dumped mesh to " << dump_path;
-        else
-            BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Failed to dump mesh to " << dump_path;
-    }
-
     TriangleMesh mesh(std::move(its));
     return mesh;
 }
