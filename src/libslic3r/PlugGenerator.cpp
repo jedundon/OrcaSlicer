@@ -173,27 +173,13 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
 
     Vec3f offset = -normal * depth;  // Inward direction.
 
-    // Recess the front cap slightly inward to avoid coplanar faces with
-    // the original model surface.  When both lie on the same Z-height
-    // (bed-facing holes), the slicer's boolean union of coplanar faces
-    // from two MODEL_PART volumes is unreliable.  Recessing the front
-    // cap by 10 µm moves it just inside the model; the original surface
-    // covers the tiny gap, and the first slicer layer that intersects
-    // the plug sees a clean donut cross-section instead of ambiguous
-    // coplanar geometry.
-    const float FRONT_RECESS = 0.01f;  // 10 µm
-    Vec3f recess = -normal * FRONT_RECESS;  // inward from surface
-
     // ── 3c: Side walls for outer boundary ──
     // Each edge is Z-subdivided to avoid slicer zigzag artifacts.
-    // Side walls span from recessed front to back.
     int total_side_tris = 0;
     for (int i = 0; i < n; ++i) {
         int i_next = (i + 1) % n;
         size_t before = faces.size();
-        Vec3f wall_span = offset - recess;  // from recessed front to back
-        emit_side_wall_quads(loop[i] + recess, loop[i_next] + recess,
-                             wall_span,
+        emit_side_wall_quads(loop[i], loop[i_next], offset,
                              /*reverse_winding=*/false, vertices, faces);
         total_side_tris += (int)(faces.size() - before);
     }
@@ -204,11 +190,9 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
         int in_n = (int)inner.size();
         if (in_n < 3) continue;
 
-        Vec3f wall_span = offset - recess;  // from recessed front to back
         for (int i = 0; i < in_n; ++i) {
             int i_next = (i + 1) % in_n;
-            emit_side_wall_quads(inner[i] + recess, inner[i_next] + recess,
-                                 wall_span,
+            emit_side_wall_quads(inner[i], inner[i_next], offset,
                                  /*reverse_winding=*/true, vertices, faces);
         }
     }
@@ -223,17 +207,17 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     // in the mesh. We snap cap vertices to the nearest boundary vertex
     // within a tight tolerance so its_merge_vertices (exact equality)
     // can weld them.
-    std::vector<Vec3f> boundary_pts_front;  // front face positions (recessed)
+    std::vector<Vec3f> boundary_pts_front;  // front face positions
     std::vector<Vec3f> boundary_pts_back;   // back face positions
     boundary_pts_front.reserve(n + 16);
     boundary_pts_back.reserve(n + 16);
     for (int i = 0; i < n; ++i) {
-        boundary_pts_front.push_back(loop[i] + recess);
+        boundary_pts_front.push_back(loop[i]);
         boundary_pts_back.push_back(loop[i] + offset);
     }
     for (const auto &inner : boundary.inner_loops) {
         for (const Vec3f &pt : inner) {
-            boundary_pts_front.push_back(pt + recess);
+            boundary_pts_front.push_back(pt);
             boundary_pts_back.push_back(pt + offset);
         }
     }
@@ -251,10 +235,10 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     };
 
     // ── 3d: Front cap triangles ──
-    // Convert triangulated 2D points back to 3D, recessed inward, and snap to boundary.
+    // Convert triangulated 2D points back to 3D and snap to boundary.
     int front_cap_base = (int)vertices.size();
     for (const Vec2d &p : tri_pts_2d) {
-        Vec3f v3 = unproject_to_3d(p, origin, u, v) + recess;
+        Vec3f v3 = unproject_to_3d(p, origin, u, v);
         snap_to_boundary(v3, boundary_pts_front);
         vertices.push_back(v3);
     }
