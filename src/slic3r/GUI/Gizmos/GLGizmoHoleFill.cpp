@@ -912,7 +912,7 @@ void GLGizmoHoleFill::enter_batch_preview(const Vec2d& mouse_position)
 
     discover_batch_matches();
 
-    BOOST_LOG_TRIVIAL(info) << "[HoleFill] enter_batch_preview done: preview.size()=" << m_batch_preview.size();
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] enter_batch_preview done: preview.size()=" << m_batch_preview.size();
 
     m_parent.set_as_dirty();
 }
@@ -924,7 +924,7 @@ void GLGizmoHoleFill::discover_batch_matches()
     const Selection& selection = m_parent.get_selection();
     const auto& content = selection.get_content();
 
-    BOOST_LOG_TRIVIAL(info) << "[HoleFill] discover_batch_matches: content.size()=" << content.size()
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] discover_batch_matches: content.size()=" << content.size()
         << " ref_obj=" << m_batch_ref_object_idx
         << " ref_vol=" << m_batch_ref_volume_idx
         << " ref_facet=" << m_batch_ref_facet
@@ -1008,7 +1008,7 @@ void GLGizmoHoleFill::discover_batch_matches()
                 Transform3d    trafo       = mi->get_transformation().get_matrix() * vol->get_matrix();
                 Eigen::Matrix3f normal_mat = trafo.linear().inverse().transpose().cast<float>();
 
-                BOOST_LOG_TRIVIAL(info) << "[HoleFill] discover obj=" << obj_idx << " inst=" << inst_idx
+                BOOST_LOG_TRIVIAL(warning) << "[HoleFill] discover obj=" << obj_idx << " inst=" << inst_idx
                     << " vol=" << vi << " name=" << vol->name << " tris=" << its.indices.size();
 
                 // Pick at most one seed per unique quantized local-normal direction.
@@ -1051,13 +1051,13 @@ void GLGizmoHoleFill::discover_batch_matches()
                         seeds.push_back(fi);
                 }
 
-                BOOST_LOG_TRIVIAL(info) << "[HoleFill] discover obj=" << obj_idx << " vol=" << vi
+                BOOST_LOG_TRIVIAL(warning) << "[HoleFill] discover obj=" << obj_idx << " vol=" << vi
                     << " seeds=" << seeds.size();
 
                 for (int seed_fi : seeds) {
                     std::vector<HoleBoundary> boundaries =
                         find_hole_boundaries(its, seed_fi, m_angle_tolerance);
-                    BOOST_LOG_TRIVIAL(info) << "[HoleFill] seed=" << seed_fi << " boundaries=" << boundaries.size();
+                    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] seed=" << seed_fi << " boundaries=" << boundaries.size();
                     if (boundaries.empty())
                         continue;
 
