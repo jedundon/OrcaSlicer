@@ -1044,7 +1044,7 @@ void GLGizmoHoleFill::discover_batch_matches()
                         matches = true;
                     } else {
                         Vec3f world_n = (normal_mat * local_n).normalized();
-                        matches = world_n.dot(m_batch_ref_world_normal) > cos_tol;
+                        matches = world_n.dot(m_batch_ref_world_normal) >= cos_tol;
                     }
 
                     if (!matches) {
