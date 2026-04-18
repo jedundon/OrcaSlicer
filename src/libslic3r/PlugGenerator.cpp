@@ -115,40 +115,40 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     build_plane_frame(normal, u, v);
 
     // ── Step 1: Create a Slic3r Polygon from the boundary loop ──────────
-    // Z-subdivide boundary edges and project to 2D.  The side walls also
-    // Z-subdivide each edge; if the cap polygon only keeps the original
-    // corners, the cap's boundary edge (corner->corner) won't share edges
-    // with the side wall's subdivided segments (corner->sub1->sub2->corner).
-    // By inserting the same subdivision points into the cap polygon, the
-    // tessellator produces cap triangles whose boundary edges exactly match
-    // the side-wall strip endpoints, yielding a manifold mesh.
+    // Project 3D boundary to 2D, then convert to scaled Slic3r Points.
+    // The cap polygon uses the original loop corners (not Z-subdivided)
+    // so the tessellator produces clean triangles.  Z-subdivision points
+    // are added later as stitching fan triangles to bridge cap edges to
+    // the finer side-wall segmentation (see Step 3f).
 
     Vec3f offset = -normal * depth;  // Inward direction.
 
-    // Build the subdivided 3D ring AND its 2D projection simultaneously.
-    std::vector<Vec3f> subdiv_loop_front;   // subdivided 3D front positions
-    std::vector<Vec3f> subdiv_loop_back;    // subdivided 3D back positions
     Polygon poly_2d;
+    poly_2d.points.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        Vec2d p = project_to_2d(loop[i], origin, u, v);
+        poly_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
+    }
 
+    // Pre-compute Z-subdivision for each boundary edge.  This table is
+    // shared by the side-wall emitter and the cap-stitching fan generator.
+    // subdiv_pts[i] = list of INTERMEDIATE 3D points between loop[i] and
+    // loop[(i+1)%n], NOT including the endpoints.  Empty if n_sub == 1.
+    std::vector<std::vector<Vec3f>> subdiv_pts(n);
     for (int i = 0; i < n; ++i) {
         int i_next = (i + 1) % n;
         float dz = std::abs(loop[i_next].z() - loop[i].z());
         int n_sub = 1;
         if (dz > SIDE_WALL_Z_STEP)
             n_sub = std::min((int)std::ceil(dz / SIDE_WALL_Z_STEP), 500);
-
-        // Emit subdivision points for this edge (exclude the last point;
-        // it will be the first point of the next edge, or wrap around).
-        for (int s = 0; s < n_sub; ++s) {
-            float t = (float)s / (float)n_sub;
-            Vec3f pt = loop[i] + t * (loop[i_next] - loop[i]);
-            subdiv_loop_front.push_back(pt);
-            subdiv_loop_back.push_back(pt + offset);
-            Vec2d p = project_to_2d(pt, origin, u, v);
-            poly_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
+        if (n_sub > 1) {
+            subdiv_pts[i].reserve(n_sub - 1);
+            for (int s = 1; s < n_sub; ++s) {
+                float t = (float)s / (float)n_sub;
+                subdiv_pts[i].push_back(loop[i] + t * (loop[i_next] - loop[i]));
+            }
         }
     }
-    const int n_subdiv = (int)subdiv_loop_front.size();
 
     // Detect original 2D winding before canonicalisation.
     bool outer_is_ccw = poly_2d.is_counter_clockwise();
@@ -213,13 +213,12 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     std::vector<Vec3i32> faces;
 
     // ── 3c: Side walls for outer boundary ──
-    // Walk the subdivided ring.  Each consecutive pair is one side-wall
-    // quad (no further Z-subdivision needed -- already subdivided above).
+    // Each boundary edge is Z-subdivided by emit_side_wall_quads.
     int total_side_tris = 0;
-    for (int i = 0; i < n_subdiv; ++i) {
-        int i_next = (i + 1) % n_subdiv;
+    for (int i = 0; i < n; ++i) {
+        int i_next = (i + 1) % n;
         size_t before = faces.size();
-        emit_side_wall_quads(subdiv_loop_front[i], subdiv_loop_front[i_next], offset,
+        emit_side_wall_quads(loop[i], loop[i_next], offset,
                              /*reverse_winding=*/!outer_is_ccw, vertices, faces);
         total_side_tris += (int)(faces.size() - before);
     }
@@ -259,15 +258,19 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     // in the mesh. We snap cap vertices to the nearest boundary vertex
     // within a tight tolerance so its_merge_vertices (exact equality)
     // can weld them.
-    // Use the subdivided ring (includes original corners plus Z-subdivision
-    // intermediates) so every cap boundary vertex can snap.
+    // Use the original loop corners plus all Z-subdivision intermediates
+    // so every cap boundary vertex AND fan vertex can snap.
     std::vector<Vec3f> boundary_pts_front;  // front face positions
     std::vector<Vec3f> boundary_pts_back;   // back face positions
-    boundary_pts_front.reserve(n_subdiv + 16);
-    boundary_pts_back.reserve(n_subdiv + 16);
-    for (int i = 0; i < n_subdiv; ++i) {
-        boundary_pts_front.push_back(subdiv_loop_front[i]);
-        boundary_pts_back.push_back(subdiv_loop_back[i]);
+    boundary_pts_front.reserve(n * 32 + 16);
+    boundary_pts_back.reserve(n * 32 + 16);
+    for (int i = 0; i < n; ++i) {
+        boundary_pts_front.push_back(loop[i]);
+        boundary_pts_back.push_back(loop[i] + offset);
+        for (const Vec3f &sp : subdiv_pts[i]) {
+            boundary_pts_front.push_back(sp);
+            boundary_pts_back.push_back(sp + offset);
+        }
     }
     for (const auto &inner : boundary.inner_loops) {
         for (const Vec3f &pt : inner) {
@@ -288,35 +291,150 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
         }
     };
 
-    // ── 3d: Front cap triangles ──
-    // Convert triangulated 2D points back to 3D and snap to boundary.
-    int front_cap_base = (int)vertices.size();
-    for (const Vec2d &p : tri_pts_2d) {
-        Vec3f v3 = unproject_to_3d(p, origin, u, v);
-        snap_to_boundary(v3, boundary_pts_front);
-        vertices.push_back(v3);
-    }
+    // ── 3d/3e: Cap triangles with fan-stitching ──
+    // Each cap triangle from the tessellator is checked for boundary edges.
+    // If a boundary edge has Z-subdivision intermediates, the cap triangle
+    // is replaced by a fan of smaller triangles from the opposite vertex
+    // through the subdivision points.  This ensures the cap's boundary
+    // edges exactly match the finer side-wall segmentation.
+    //
+    // Boundary edge detection: an edge (P, Q) is a boundary edge if both
+    // P and Q snap to consecutive boundary-ring vertices loop[i] and
+    // loop[(i+1)%n].  We build a lookup from (snapped) boundary vertex
+    // pairs to the corresponding subdivision-point list.
 
-    for (int t = 0; t < num_cap_tris; ++t) {
-        int base = front_cap_base + t * 3;
-        // Normal should point outward (same direction as plane_normal).
-        faces.push_back(Vec3i32(base, base + 1, base + 2));
+    // Build lookup: boundary vertex pair → subdivision intermediates.
+    // Key: (front_a, front_b) as 3D positions of consecutive ring verts.
+    // We'll match snapped cap vertices against this.
+    struct BoundaryEdge {
+        Vec3f a, b;                // front positions of the two corners
+        std::vector<Vec3f> intermediates;  // Z-subdivision points between a and b
+    };
+    std::vector<BoundaryEdge> outer_boundary_edges;
+    outer_boundary_edges.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        BoundaryEdge be;
+        be.a = loop[i];
+        be.b = loop[(i + 1) % n];
+        be.intermediates = subdiv_pts[i];  // may be empty
+        outer_boundary_edges.push_back(std::move(be));
     }
+    // Also add inner-loop boundary edges (no Z-subdivision for inner loops
+    // since they typically have small dZ, but include for completeness).
+    // Inner-loop edges currently have no Z-subdivision, so intermediates
+    // will always be empty.
 
-    // ── 3e: Back cap triangles ──
-    // Same shape but offset inward, with reversed winding.
-    int back_cap_base = (int)vertices.size();
-    for (const Vec2d &p : tri_pts_2d) {
-        Vec3f v3 = unproject_to_3d(p, origin, u, v) + offset;
-        snap_to_boundary(v3, boundary_pts_back);
-        vertices.push_back(v3);
-    }
+    // Helper: find if two 3D points match a boundary edge (within snap tol)
+    // and return the intermediates if found.  Also checks the reversed
+    // direction (since the tessellator may reverse polygon winding).
+    // `reversed_out` is set to true when the match is in reverse order.
+    auto find_boundary_intermediates = [&](const Vec3f &pa, const Vec3f &pb,
+                                           bool &reversed_out)
+        -> const std::vector<Vec3f>* {
+        for (const auto &be : outer_boundary_edges) {
+            if ((pa - be.a).squaredNorm() < snap_tol_sq &&
+                (pb - be.b).squaredNorm() < snap_tol_sq) {
+                reversed_out = false;
+                return &be.intermediates;
+            }
+            if ((pa - be.b).squaredNorm() < snap_tol_sq &&
+                (pb - be.a).squaredNorm() < snap_tol_sq) {
+                reversed_out = true;
+                return &be.intermediates;
+            }
+        }
+        return nullptr;
+    };
 
-    for (int t = 0; t < num_cap_tris; ++t) {
-        int base = back_cap_base + t * 3;
-        // Reversed winding so normal points inward (opposite of plane_normal).
-        faces.push_back(Vec3i32(base, base + 2, base + 1));
-    }
+    // Emit cap triangles for one face (front or back).
+    // For each tessellated triangle, check all 3 edges for boundary-edge
+    // matches with non-empty intermediates.  If found, replace the triangle
+    // with a fan through the subdivision points.
+    auto emit_cap_tris = [&](
+        const std::vector<Vec3f> &bpts,   // snap targets
+        const Vec3f &face_offset,         // Vec3f(0,0,0) for front, offset for back
+        bool reverse_winding)             // true for back cap
+    {
+        for (int t = 0; t < num_cap_tris; ++t) {
+            Vec3f v0 = unproject_to_3d(tri_pts_2d[t*3+0], origin, u, v) + face_offset;
+            Vec3f v1 = unproject_to_3d(tri_pts_2d[t*3+1], origin, u, v) + face_offset;
+            Vec3f v2 = unproject_to_3d(tri_pts_2d[t*3+2], origin, u, v) + face_offset;
+            snap_to_boundary(v0, bpts);
+            snap_to_boundary(v1, bpts);
+            snap_to_boundary(v2, bpts);
+
+            // Check each of the 3 edges for boundary intermediates.
+            // verts[e] → verts[(e+1)%3], opposite = verts[(e+2)%3].
+            Vec3f tri[3] = {v0, v1, v2};
+            int fan_edge = -1;  // which edge (0,1,2) has intermediates
+            const std::vector<Vec3f> *intermediates = nullptr;
+            bool edge_reversed = false;  // true if cap edge is reversed vs stored
+
+            for (int e = 0; e < 3; ++e) {
+                const Vec3f &ea = tri[e];
+                const Vec3f &eb = tri[(e + 1) % 3];
+                bool rev = false;
+                auto *mid = find_boundary_intermediates(ea, eb, rev);
+                if (mid && !mid->empty()) {
+                    fan_edge = e;
+                    intermediates = mid;
+                    edge_reversed = rev;
+                    break;  // handle one subdivided edge per triangle
+                }
+            }
+
+            if (fan_edge < 0) {
+                // No subdivided boundary edge — emit original triangle.
+                int base = (int)vertices.size();
+                vertices.push_back(v0);
+                vertices.push_back(v1);
+                vertices.push_back(v2);
+                if (!reverse_winding)
+                    faces.push_back(Vec3i32(base, base+1, base+2));
+                else
+                    faces.push_back(Vec3i32(base, base+2, base+1));
+            } else {
+                // Replace triangle with fan from opposite vertex through
+                // subdivision points along the boundary edge.
+                const Vec3f &ea = tri[fan_edge];
+                const Vec3f &eb = tri[(fan_edge + 1) % 3];
+                const Vec3f &opp = tri[(fan_edge + 2) % 3];
+
+                // Build the full chain along the boundary edge in the
+                // same direction as the cap traversal (ea → eb).
+                // If edge_reversed, intermediates are stored A→B but
+                // the cap traverses B→A, so we reverse the intermediates.
+                std::vector<Vec3f> chain;
+                chain.reserve(intermediates->size() + 2);
+                chain.push_back(ea);
+                if (!edge_reversed) {
+                    for (const Vec3f &mp : *intermediates)
+                        chain.push_back(mp + face_offset);
+                } else {
+                    for (int mi = (int)intermediates->size() - 1; mi >= 0; --mi)
+                        chain.push_back((*intermediates)[mi] + face_offset);
+                }
+                chain.push_back(eb);
+
+                for (size_t ci = 0; ci + 1 < chain.size(); ++ci) {
+                    int base = (int)vertices.size();
+                    vertices.push_back(opp);
+                    vertices.push_back(chain[ci]);
+                    vertices.push_back(chain[ci + 1]);
+                    if (!reverse_winding)
+                        faces.push_back(Vec3i32(base, base+1, base+2));
+                    else
+                        faces.push_back(Vec3i32(base, base+2, base+1));
+                }
+            }
+        }
+    };
+
+    // Front cap: snap to front boundary, no offset, normal winding.
+    emit_cap_tris(boundary_pts_front, Vec3f(0, 0, 0), /*reverse_winding=*/false);
+
+    // Back cap: snap to back boundary, offset applied, reversed winding.
+    emit_cap_tris(boundary_pts_back, offset, /*reverse_winding=*/true);
 
     // ── Step 4: Build TriangleMesh ──────────────────────────────────────
     indexed_triangle_set its;
