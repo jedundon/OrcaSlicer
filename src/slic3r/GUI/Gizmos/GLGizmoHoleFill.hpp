@@ -117,6 +117,10 @@ private:
     // Keyed by (object_idx, volume_raw_idx). Cleared in data_changed().
     std::map<std::pair<int,int>, std::unique_ptr<MeshRaycaster>> m_multi_raycasters;
 
+    // When true, data_changed() skips destructive resets (raycaster clear,
+    // batch state reset) so that consecutive batch fills don't lose the cache.
+    bool m_suppress_data_changed = false;
+
     static const constexpr float HoleFillDepthMin    = 0.2f;
     static const constexpr float HoleFillDepthMax    = 5.0f;
     static const constexpr float HoleCutDepthMax     = 50.0f;

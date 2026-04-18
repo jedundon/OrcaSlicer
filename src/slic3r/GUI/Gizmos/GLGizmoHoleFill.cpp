@@ -106,6 +106,13 @@ void GLGizmoHoleFill::on_set_state()
 void GLGizmoHoleFill::data_changed(bool /*is_serializing*/)
 {
     init_extruders_data();
+
+    // When our own plater()->update() triggers a scene reload we still need
+    // fresh extruder colors, but clearing the raycaster cache and batch state
+    // would break the next click in a consecutive same-color batch fill.
+    if (m_suppress_data_changed)
+        return;
+
     reset_hover_state();
     m_multi_raycasters.clear();
     // A selection change mid-batch would desync state; clear it.
@@ -997,7 +1004,10 @@ void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
         ++filled;
     }
 
+    m_suppress_data_changed = true;
     wxGetApp().plater()->update();
+    m_suppress_data_changed = false;
+
     for (int oi : touched_objects)
         wxGetApp().obj_list()->update_info_items((size_t)oi);
 
