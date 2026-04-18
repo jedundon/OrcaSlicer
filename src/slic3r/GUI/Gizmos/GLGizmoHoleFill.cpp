@@ -446,6 +446,9 @@ void GLGizmoHoleFill::perform_hole_remove()
     mo_mut->delete_volume((size_t)m_hover_plug_raw_idx);
 
     wxGetApp().plater()->update();
+    // Re-select the object so reload_scene doesn't find an empty selection
+    // and deactivate the gizmo (the deleted GLVolume invalidated old indices).
+    m_parent.get_selection().add_object((unsigned int)object_idx, true);
     wxGetApp().obj_list()->update_info_items((size_t)object_idx);
 
     wxGetApp().plater()->get_notification_manager()->push_notification(
@@ -716,6 +719,7 @@ void GLGizmoHoleFill::perform_remove_all_on_surface(const Vec2d& /*mouse_positio
         mo_mut->delete_volume((size_t)*it);
 
     wxGetApp().plater()->update();
+    m_parent.get_selection().add_object((unsigned int)object_idx, true);
     wxGetApp().obj_list()->update_info_items((size_t)object_idx);
 
     const int removed = (int)to_delete.size();
