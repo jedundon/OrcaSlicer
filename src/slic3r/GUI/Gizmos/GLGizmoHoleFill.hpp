@@ -39,8 +39,12 @@ protected:
     void on_render() override;
     void on_render_input_window(float x, float y, float bottom_limit) override;
 
+public:
+    enum class Mode : int { Fill = 0, Cut = 1 };
+
 private:
     // UI / config state
+    Mode   m_mode                  = Mode::Fill;
     float  m_depth                 = 1.0f;
     float  m_angle_tolerance       = 5.0f;
     size_t m_selected_extruder_idx = 0;
@@ -49,6 +53,7 @@ private:
     // Hover preview state
     int          m_hover_facet      = -1;
     int          m_hover_mesh_id    = -1;
+    Mode         m_hover_mode       = Mode::Fill;
     bool         m_hover_hole_valid = false;
     HoleBoundary m_hover_boundary;
     GLModel      m_hover_outline_mesh;
@@ -57,8 +62,8 @@ private:
     // Remove-mode hover state: set when the cursor is over an existing
     // HoleFill_ plug volume. In that case we show a red outline and left
     // click removes the plug instead of filling.
-    bool    m_hover_is_plug        = false;
-    int     m_hover_plug_raw_idx   = -1;  // index into ModelObject::volumes
+    bool    m_hover_is_plug             = false;
+    int     m_hover_plug_raw_idx        = -1;  // index into ModelObject::volumes
     int     m_remove_outline_cached_idx = -1;
     GLModel m_remove_outline_mesh;
 
@@ -71,9 +76,10 @@ private:
     };
     RaycastResult m_rr;
 
-    static const constexpr float HoleFillDepthMin  = 0.2f;
-    static const constexpr float HoleFillDepthMax  = 5.0f;
-    static const constexpr float HoleFillDepthStep = 0.1f;
+    static const constexpr float HoleFillDepthMin    = 0.2f;
+    static const constexpr float HoleFillDepthMax    = 5.0f;
+    static const constexpr float HoleCutDepthMax     = 50.0f;
+    static const constexpr float HoleFillDepthStep   = 0.1f;
 
     // Translated UI strings, populated on_init().
     std::map<std::string, wxString> m_desc;
@@ -82,6 +88,7 @@ private:
     void update_hover(const Vec2d& mouse_position);
     void perform_hole_fill(const Vec2d& mouse_position);
     void perform_hole_remove();
+    void perform_fill_all_on_surface(const Vec2d& mouse_position);
     void render_hole_fill_hover();
     void render_remove_hover();
     bool pick_mesh(const Vec2d& mouse_position, RaycastResult& out) const;

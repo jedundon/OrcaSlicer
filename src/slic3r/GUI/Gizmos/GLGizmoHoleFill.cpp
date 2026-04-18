@@ -38,12 +38,18 @@ bool GLGizmoHoleFill::on_init()
     m_shortcut_key = WXK_CONTROL_H;
 
     m_desc["hole_fill_depth"] = _L("Fill depth");
+    m_desc["hole_cut_depth"]  = _L("Cut depth");
     m_desc["angle_tolerance"] = _L("Angle tolerance");
     m_desc["filament"]        = _L("Filament");
     m_desc["pending_plugs"]   = _L("Pending plugs");
     m_desc["apply"]           = _L("Apply");
     m_desc["cancel"]          = _L("Cancel");
     m_desc["tool_hole_fill"]  = _L("Hole fill");
+    m_desc["mode"]            = _L("Mode");
+    m_desc["mode_fill"]       = _L("Fill");
+    m_desc["mode_cut"]        = _L("Cut");
+    m_desc["island_warning"]  = _L("Warning: This hole has islands that may become disconnected after cutting. Consider using Fill mode instead.");
+    m_desc["shift_fill_all"]  = _L("Shift+Click: Fill all holes on surface");
 
     init_extruders_data();
     return true;
@@ -224,11 +230,13 @@ bool GLGizmoHoleFill::on_mouse(const wxMouseEvent& mouse_event)
         return false;
     }
 
-    if (mouse_event.LeftDown() && !mouse_event.ShiftDown()) {
+    if (mouse_event.LeftDown()) {
         const Vec2d mp(mouse_event.GetX(), mouse_event.GetY());
         update_hover(mp);
         if (m_hover_is_plug)
             perform_hole_remove();
+        else if (mouse_event.ShiftDown())
+            perform_fill_all_on_surface(mp);
         else
             perform_hole_fill(mp);
         reset_hover_state();  // W3: clear stale hover after fill/remove
@@ -236,8 +244,9 @@ bool GLGizmoHoleFill::on_mouse(const wxMouseEvent& mouse_event)
     }
 
     if (mouse_event.GetWheelRotation() != 0 && mouse_event.ControlDown()) {
+        const float depth_max = (m_mode == Mode::Cut) ? HoleCutDepthMax : HoleFillDepthMax;
         m_depth = mouse_event.GetWheelRotation() > 0
-            ? std::min(m_depth + HoleFillDepthStep, HoleFillDepthMax)
+            ? std::min(m_depth + HoleFillDepthStep, depth_max)
             : std::max(m_depth - HoleFillDepthStep, HoleFillDepthMin);
         m_parent.set_as_dirty();
         return true;
@@ -310,46 +319,63 @@ void GLGizmoHoleFill::perform_hole_fill(const Vec2d& mouse_position)
         << " pts, inner_loops=" << boundary.inner_loops.size()
         << ", normal=(" << boundary.plane_normal.x() << "," << boundary.plane_normal.y()
         << "," << boundary.plane_normal.z() << ")";
+
+    const bool is_cut = (m_mode == Mode::Cut);
+
+    // Island warning: a cut through a hole with inner loops leaves disconnected geometry.
+    if (is_cut && !boundary.inner_loops.empty()) {
+        wxGetApp().plater()->get_notification_manager()->push_notification(
+            NotificationType::CustomNotification,
+            NotificationManager::NotificationLevel::WarningNotificationLevel,
+            _u8L("Warning: This hole has islands that may become disconnected after cutting. Consider using Fill mode instead."));
+    }
+
     TriangleMesh plug = generate_plug(boundary, m_depth);
     if (plug.empty()) {
         wxGetApp().plater()->get_notification_manager()->push_notification(
             NotificationType::CustomNotification,
             NotificationManager::NotificationLevel::WarningNotificationLevel,
-            _u8L("Failed to generate hole fill plug. The hole geometry may be too complex."));
+            is_cut ? _u8L("Failed to generate hole cut volume. The hole geometry may be too complex.")
+                   : _u8L("Failed to generate hole fill plug. The hole geometry may be too complex."));
         return;
     }
 
-    // Duplicate fill guard: compare bounding-box centers against existing HoleFill_ volumes.
+    // Duplicate guard: compare bounding-box centers against existing volumes of the same kind.
     {
         const auto  plug_center   = plug.bounding_box().center();
         const float dup_threshold = 0.1f;
         for (const ModelVolume* vol : mo->volumes) {
             if (vol->name.rfind("HoleFill_", 0) != 0)
                 continue;
-            if (vol->name.rfind("HoleFill_neg_", 0) == 0)
+            const bool vol_is_neg = vol->name.rfind("HoleFill_neg_", 0) == 0;
+            if (vol_is_neg != is_cut)
                 continue;
             const auto existing_center = vol->mesh().bounding_box().center();
             if ((plug_center.cast<double>() - existing_center.cast<double>()).norm() < dup_threshold) {
                 wxGetApp().plater()->get_notification_manager()->push_notification(
                     NotificationType::CustomNotification,
                     NotificationManager::NotificationLevel::RegularNotificationLevel,
-                    _u8L("This hole is already filled. Remove the existing HoleFill volume from the object list to refill."));
+                    is_cut ? _u8L("This hole is already cut. Remove the existing HoleFill_neg volume from the object list to re-cut.")
+                           : _u8L("This hole is already filled. Remove the existing HoleFill volume from the object list to refill."));
                 return;
             }
         }
     }
 
-    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Hole fill color");
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), is_cut ? "Hole cut" : "Hole fill color");
 
     // Copy source transform before add_volume (which may invalidate hit_volume).
     const Geometry::Transformation source_trafo = hit_volume->get_transformation();
 
     ModelObject* mo_mut = wxGetApp().model().objects[object_idx];
-    ModelVolume* new_vol = mo_mut->add_volume(std::move(plug), ModelVolumeType::MODEL_PART, false);
+    const ModelVolumeType new_type = is_cut ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART;
+    ModelVolume* new_vol = mo_mut->add_volume(std::move(plug), new_type, false);
     new_vol->set_new_unique_id();
-    new_vol->name = "HoleFill_" + std::to_string(hit_volume_raw_idx) + "_f" + std::to_string(facet_idx);
+    const std::string name_prefix = is_cut ? "HoleFill_neg_" : "HoleFill_";
+    new_vol->name = name_prefix + std::to_string(hit_volume_raw_idx) + "_f" + std::to_string(facet_idx);
 
-    new_vol->config.set("extruder", (int)m_selected_extruder_idx + 1);
+    if (!is_cut)
+        new_vol->config.set("extruder", (int)m_selected_extruder_idx + 1);
     new_vol->set_transformation(source_trafo);
 
     wxGetApp().plater()->update();
@@ -358,7 +384,8 @@ void GLGizmoHoleFill::perform_hole_fill(const Vec2d& mouse_position)
     wxGetApp().plater()->get_notification_manager()->push_notification(
         NotificationType::CustomNotification,
         NotificationManager::NotificationLevel::RegularNotificationLevel,
-        _u8L("Hole filled successfully! A new volume has been added with the selected filament."));
+        is_cut ? _u8L("Hole cut successfully! A negative volume has been added to subtract from the object.")
+               : _u8L("Hole filled successfully! A new volume has been added with the selected filament."));
 }
 
 void GLGizmoHoleFill::perform_hole_remove()
@@ -398,6 +425,156 @@ void GLGizmoHoleFill::perform_hole_remove()
         NotificationType::CustomNotification,
         NotificationManager::NotificationLevel::RegularNotificationLevel,
         _u8L("Hole fill removed."));
+}
+
+void GLGizmoHoleFill::perform_fill_all_on_surface(const Vec2d& mouse_position)
+{
+    const Selection& selection = m_parent.get_selection();
+    if (selection.is_empty())
+        return;
+
+    const ModelObject* mo = m_c->selection_info()->model_object();
+    if (!mo)
+        return;
+
+    int object_idx = selection.get_object_idx();
+    if (object_idx < 0)
+        return;
+
+    if (m_rr.mesh_id < 0 && !pick_mesh(mouse_position, m_rr)) {
+        wxGetApp().plater()->get_notification_manager()->push_notification(
+            NotificationType::CustomNotification,
+            NotificationManager::NotificationLevel::RegularNotificationLevel,
+            _u8L("No surface detected under cursor."));
+        return;
+    }
+    if (m_rr.mesh_id < 0)
+        return;
+
+    int model_part_idx = 0;
+    const ModelVolume* hit_volume     = nullptr;
+    int                hit_volume_raw_idx = -1;
+    for (int vi = 0; vi < (int)mo->volumes.size(); ++vi) {
+        if (!mo->volumes[vi]->is_model_part())
+            continue;
+        if (model_part_idx == m_rr.mesh_id) {
+            hit_volume         = mo->volumes[vi];
+            hit_volume_raw_idx = vi;
+            break;
+        }
+        ++model_part_idx;
+    }
+    if (!hit_volume)
+        return;
+
+    const indexed_triangle_set& its = hit_volume->mesh().its;
+    if (its.indices.empty())
+        return;
+
+    const int facet_idx = m_rr.facet;
+    const bool is_cut   = (m_mode == Mode::Cut);
+
+    // find_hole_boundaries already returns ALL holes on the coplanar region
+    // surrounding the seed facet — flood-fills coplanar faces, chains boundary
+    // edges into loops, and classifies perimeter vs holes vs islands.
+    std::vector<HoleBoundary> boundaries =
+        find_hole_boundaries(its, facet_idx, m_angle_tolerance);
+    if (boundaries.empty()) {
+        wxGetApp().plater()->get_notification_manager()->push_notification(
+            NotificationType::CustomNotification,
+            NotificationManager::NotificationLevel::RegularNotificationLevel,
+            _u8L("No holes detected on this surface."));
+        return;
+    }
+
+    // Collect existing HoleFill_ plug centers (of the same kind as the current
+    // mode — fill plugs vs negative cut volumes) for duplicate rejection.
+    std::vector<Vec3d> existing_centers;
+    for (const ModelVolume* vol : mo->volumes) {
+        if (vol->name.rfind("HoleFill_", 0) != 0)
+            continue;
+        const bool vol_is_neg = vol->name.rfind("HoleFill_neg_", 0) == 0;
+        if (vol_is_neg != is_cut)
+            continue;
+        existing_centers.push_back(vol->mesh().bounding_box().center());
+    }
+    const double dup_threshold = 0.1; // 100 µm, matches single-hole path
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(),
+        is_cut ? "Cut all holes on surface" : "Fill all holes on surface");
+
+    const Geometry::Transformation source_trafo = hit_volume->get_transformation();
+    ModelObject* mo_mut = wxGetApp().model().objects[object_idx];
+
+    int filled  = 0;
+    int skipped = 0;
+    int failed  = 0;
+
+    const ModelVolumeType new_type = is_cut ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART;
+    const std::string name_prefix  = is_cut ? "HoleFill_neg_" : "HoleFill_";
+
+    for (size_t i = 0; i < boundaries.size(); ++i) {
+        const HoleBoundary& boundary = boundaries[i];
+        TriangleMesh plug = generate_plug(boundary, m_depth);
+        if (plug.empty()) {
+            ++failed;
+            continue;
+        }
+
+        const Vec3d plug_center = plug.bounding_box().center();
+        bool dupe = false;
+        for (const Vec3d& ec : existing_centers) {
+            if ((plug_center - ec).norm() < dup_threshold) {
+                dupe = true;
+                break;
+            }
+        }
+        if (dupe) {
+            ++skipped;
+            continue;
+        }
+
+        ModelVolume* new_vol = mo_mut->add_volume(std::move(plug), new_type, false);
+        new_vol->set_new_unique_id();
+        new_vol->name = name_prefix + std::to_string(hit_volume_raw_idx)
+                        + "_surf" + std::to_string(facet_idx)
+                        + "_" + std::to_string(i);
+        if (!is_cut)
+            new_vol->config.set("extruder", (int)m_selected_extruder_idx + 1);
+        new_vol->set_transformation(source_trafo);
+
+        // Guard against in-batch duplicates (e.g. overlapping detections).
+        existing_centers.push_back(plug_center);
+        ++filled;
+    }
+
+    wxGetApp().plater()->update();
+    wxGetApp().obj_list()->update_after_undo_redo();
+
+    std::string msg;
+    if (filled > 0 && skipped > 0)
+        msg = is_cut
+            ? Slic3r::GUI::format(_L("Cut %1% holes (%2% already cut)."), filled, skipped)
+            : Slic3r::GUI::format(_L("Filled %1% holes (%2% already filled)."), filled, skipped);
+    else if (filled > 0)
+        msg = is_cut
+            ? Slic3r::GUI::format(_L("Cut %1% holes on surface."), filled)
+            : Slic3r::GUI::format(_L("Filled %1% holes on surface."), filled);
+    else if (skipped > 0)
+        msg = is_cut
+            ? Slic3r::GUI::format(_L("All %1% holes on this surface are already cut."), skipped)
+            : Slic3r::GUI::format(_L("All %1% holes on this surface are already filled."), skipped);
+    else
+        msg = is_cut
+            ? _u8L("No holes could be cut on this surface.")
+            : _u8L("No holes could be filled on this surface.");
+    if (failed > 0)
+        msg += " " + Slic3r::GUI::format(_L("(%1% failed.)"), failed);
+
+    wxGetApp().plater()->get_notification_manager()->push_notification(
+        NotificationType::CustomNotification,
+        NotificationManager::NotificationLevel::RegularNotificationLevel,
+        msg);
 }
 
 void GLGizmoHoleFill::render_remove_hover()
@@ -512,10 +689,11 @@ void GLGizmoHoleFill::render_hole_fill_hover()
 
     int facet_idx = m_rr.facet;
 
-    // Only recompute if the hover target changed.
-    if (facet_idx != m_hover_facet || m_rr.mesh_id != m_hover_mesh_id) {
+    // Only recompute if the hover target or mode changed.
+    if (facet_idx != m_hover_facet || m_rr.mesh_id != m_hover_mesh_id || m_mode != m_hover_mode) {
         m_hover_facet      = facet_idx;
         m_hover_mesh_id    = m_rr.mesh_id;
+        m_hover_mode       = m_mode;
         m_hover_hole_valid = false;
 
         const indexed_triangle_set& its = hit_volume->mesh().its;
@@ -527,12 +705,15 @@ void GLGizmoHoleFill::render_hole_fill_hover()
                 m_hover_hole_valid = true;
 
                 // Outline: line segments around boundary loop + any inner loops.
+                const bool hover_is_cut = (m_mode == Mode::Cut);
                 m_hover_outline_mesh.reset();
                 {
                     GLModel::Geometry init_data;
                     init_data.format = {GLModel::Geometry::EPrimitiveType::Lines,
                                         GLModel::Geometry::EVertexLayout::P3};
-                    init_data.color = ColorRGBA(0.0f, 1.0f, 0.3f, 1.0f); // bright green
+                    init_data.color = hover_is_cut
+                        ? ColorRGBA(1.0f, 0.55f, 0.0f, 1.0f)   // amber for Cut
+                        : ColorRGBA(0.0f, 1.0f,  0.3f, 1.0f);  // bright green for Fill
 
                     const auto& loop = m_hover_boundary.loop;
                     int n = (int)loop.size();
@@ -558,7 +739,7 @@ void GLGizmoHoleFill::render_hole_fill_hover()
                     m_hover_outline_mesh.init_from(std::move(init_data));
                 }
 
-                // Fill: translucent cap in the selected filament color.
+                // Fill: translucent cap in the selected filament color (Fill) or dark (Cut).
                 m_hover_fill_mesh.reset();
                 {
                     Vec3f normal = m_hover_boundary.plane_normal.normalized();
@@ -600,10 +781,15 @@ void GLGizmoHoleFill::render_hole_fill_hover()
                         GLModel::Geometry init_data;
                         init_data.format = {GLModel::Geometry::EPrimitiveType::Triangles,
                                             GLModel::Geometry::EVertexLayout::P3};
-                        ColorRGBA fill_color = m_extruders_colors.empty()
-                            ? ColorRGBA(1.0f, 0.5f, 0.8f, 0.35f)
-                            : m_extruders_colors[m_selected_extruder_idx % m_extruders_colors.size()];
-                        fill_color.a(0.35f);
+                        ColorRGBA fill_color;
+                        if (hover_is_cut) {
+                            fill_color = ColorRGBA(0.08f, 0.08f, 0.08f, 0.45f); // translucent dark for material removal
+                        } else {
+                            fill_color = m_extruders_colors.empty()
+                                ? ColorRGBA(1.0f, 0.5f, 0.8f, 0.35f)
+                                : m_extruders_colors[m_selected_extruder_idx % m_extruders_colors.size()];
+                            fill_color.a(0.35f);
+                        }
                         init_data.color = fill_color;
 
                         init_data.reserve_vertices(num_tris * 3);
@@ -702,32 +888,52 @@ void GLGizmoHoleFill::on_render_input_window(float x, float y, float bottom_limi
     GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always);
     GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
 
-    // Mode indicator: fill by default, remove when hovering over an existing plug.
-    if (m_hover_is_plug)
-        ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.25f, 1.0f),
-                           "%s", _u8L("Mode: Remove (click to delete)").c_str());
-    else
-        m_imgui->text(_u8L("Mode: Fill"));
-    ImGui::Separator();
-
     const float slider_icon_width = m_imgui->get_slider_icon_size().x;
     const float sliders_width     = m_imgui->scaled(7.0f);
     const float drag_left_width   = m_imgui->scaled(0.5f);
-    const float label_left_width  = std::max(
+    const float label_left_width  = std::max({
         m_imgui->calc_text_size(m_desc.at("hole_fill_depth")).x,
-        m_imgui->calc_text_size(m_desc.at("angle_tolerance")).x) + m_imgui->scaled(1.5f);
+        m_imgui->calc_text_size(m_desc.at("hole_cut_depth")).x,
+        m_imgui->calc_text_size(m_desc.at("angle_tolerance")).x,
+        m_imgui->calc_text_size(m_desc.at("mode")).x}) + m_imgui->scaled(1.5f);
+
+    // Mode toggle: Fill vs Cut.
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(m_desc.at("mode") + ":");
+    ImGui::SameLine(label_left_width);
+    if (ImGui::RadioButton((m_desc.at("mode_fill") + "##hf_mode_fill").utf8_str().data(), m_mode == Mode::Fill))
+        m_mode = Mode::Fill;
+    ImGui::SameLine();
+    if (ImGui::RadioButton((m_desc.at("mode_cut") + "##hf_mode_cut").utf8_str().data(), m_mode == Mode::Cut))
+        m_mode = Mode::Cut;
+
+    // Dynamic mode indicator: Remove when hovering a plug, otherwise Fill/Cut.
+    if (m_hover_is_plug) {
+        ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.25f, 1.0f),
+                           "%s", _u8L("Mode: Remove (click to delete)").c_str());
+    } else if (m_mode == Mode::Cut) {
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.0f, 1.0f),
+                           "%s", _u8L("Mode: Cut").c_str());
+    } else {
+        m_imgui->text(_u8L("Mode: Fill"));
+    }
+    ImGui::Separator();
+
+    const bool is_cut       = (m_mode == Mode::Cut);
+    const float depth_max   = is_cut ? HoleCutDepthMax : HoleFillDepthMax;
+    const wxString& depth_label = is_cut ? m_desc.at("hole_cut_depth") : m_desc.at("hole_fill_depth");
 
     // Depth slider + drag.
     ImGui::AlignTextToFramePadding();
-    m_imgui->text(m_desc.at("hole_fill_depth") + ":");
+    m_imgui->text(depth_label + ":");
     ImGui::SameLine(label_left_width);
     ImGui::PushItemWidth(sliders_width);
     std::string depth_fmt = std::string("%.1f ") + I18N::translate_utf8("mm", "Hole fill depth");
-    m_imgui->bbl_slider_float_style("##hole_fill_depth", &m_depth, HoleFillDepthMin, HoleFillDepthMax, depth_fmt.data(), 1.0f, true);
+    m_imgui->bbl_slider_float_style("##hole_fill_depth", &m_depth, HoleFillDepthMin, depth_max, depth_fmt.data(), 1.0f, true);
     ImGui::SameLine(drag_left_width + label_left_width);
     ImGui::PushItemWidth(1.5f * slider_icon_width);
     ImGui::BBLDragFloat("##hole_fill_depth_input", &m_depth, 0.05f, 0.0f, 0.0f, "%.1f");
-    m_depth = std::clamp(m_depth, HoleFillDepthMin, HoleFillDepthMax);
+    m_depth = std::clamp(m_depth, HoleFillDepthMin, depth_max);
 
     // Angle tolerance slider.
     ImGui::AlignTextToFramePadding();
@@ -743,7 +949,8 @@ void GLGizmoHoleFill::on_render_input_window(float x, float y, float bottom_limi
 
     ImGui::Separator();
 
-    // Filament color picker row.
+    // Filament color picker row. Disabled in Cut mode (negative volumes have no filament).
+    m_imgui->disabled_begin(is_cut);
     m_imgui->text(m_desc.at("filament") + ":");
     const int items_per_row = 8;
     for (size_t i = 0; i < m_extruders_colors.size(); ++i) {
@@ -756,16 +963,19 @@ void GLGizmoHoleFill::on_render_input_window(float x, float y, float bottom_limi
                                            : ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, (m_selected_extruder_idx == i) ? 2.0f : 0.0f);
         if (ImGui::ColorButton("##filament", col, ImGuiColorEditFlags_NoTooltip, ImVec2(20, 20)))
-            m_selected_extruder_idx = i;
+            if (!is_cut) m_selected_extruder_idx = i;
         ImGui::PopStyleVar();
         ImGui::PopStyleColor();
         ImGui::PopID();
     }
+    m_imgui->disabled_end();
 
     ImGui::Separator();
 
     // Pending plug list (placeholder — filled in in a later step).
     m_imgui->text(m_desc.at("pending_plugs") + ": 0");
+
+    m_imgui->text(m_desc.at("shift_fill_all"));
 
     ImGui::Separator();
 
