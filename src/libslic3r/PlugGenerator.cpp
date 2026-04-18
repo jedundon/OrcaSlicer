@@ -132,6 +132,10 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     ExPolygon expoly;
     expoly.contour = std::move(poly_2d);
 
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] boundary.inner_loops.size() = "
+        << boundary.inner_loops.size()
+        << " (normal=" << normal.x() << "," << normal.y() << "," << normal.z() << ")";
+
     // Add inner loops (e.g., the counter inside letter "A") as holes in the ExPolygon.
     // These regions will NOT be filled — they stay as part of the original surface.
     for (const auto &inner : boundary.inner_loops) {
@@ -148,10 +152,10 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     }
 
     // ── Step 2: Triangulate the cap face ────────────────────────────────
-    BOOST_LOG_TRIVIAL(debug) << "[PlugGen] ExPolygon contour: " << expoly.contour.points.size()
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] ExPolygon contour: " << expoly.contour.points.size()
         << " pts, " << expoly.holes.size() << " holes";
     for (size_t hi = 0; hi < expoly.holes.size(); ++hi) {
-        BOOST_LOG_TRIVIAL(debug) << "[PlugGen] Hole " << hi << ": "
+        BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Hole " << hi << ": "
             << expoly.holes[hi].points.size() << " pts, area="
             << std::abs(expoly.holes[hi].area());
     }
@@ -160,7 +164,7 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
     std::vector<Vec2d> tri_pts_2d = triangulate_expolygon_2d(expoly, NORMALS_UP);
     // tri_pts_2d contains groups of 3 points (triangle vertices).
     int num_cap_tris = (int)tri_pts_2d.size() / 3;
-    BOOST_LOG_TRIVIAL(debug) << "[PlugGen] Tessellation produced " << num_cap_tris << " triangles";
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Tessellation produced " << num_cap_tris << " triangles";
     if (num_cap_tris == 0)
         return TriangleMesh();
 

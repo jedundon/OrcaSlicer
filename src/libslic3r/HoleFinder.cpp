@@ -356,11 +356,11 @@ std::vector<HoleBoundary> find_hole_boundaries(
             island_loops.push_back({i, nesting_depth[i]});
     }
 
-    BOOST_LOG_TRIVIAL(debug) << "[HoleFinder] Classification: " << hole_loops.size() << " holes, " << island_loops.size() << " islands";
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Classification: " << hole_loops.size() << " holes, " << island_loops.size() << " islands";
     for (const auto &hl : hole_loops)
-        BOOST_LOG_TRIVIAL(debug) << "  Hole: loop " << hl.loop_idx << " (depth " << hl.depth << ", verts " << loops[hl.loop_idx].size() << ")";
+        BOOST_LOG_TRIVIAL(warning) << "  Hole: loop " << hl.loop_idx << " (depth " << hl.depth << ", verts " << loops[hl.loop_idx].size() << ")";
     for (const auto &il : island_loops)
-        BOOST_LOG_TRIVIAL(debug) << "  Island: loop " << il.loop_idx << " (depth " << il.depth << ", verts " << loops[il.loop_idx].size() << ")";
+        BOOST_LOG_TRIVIAL(warning) << "  Island: loop " << il.loop_idx << " (depth " << il.depth << ", verts " << loops[il.loop_idx].size() << ")";
 
     // Build HoleBoundary for each hole loop.
     // Map loop_idx -> index in result for parent lookup.
@@ -401,6 +401,9 @@ std::vector<HoleBoundary> find_hole_boundaries(
                 for (int vi : loops[il.loop_idx])
                     inner.push_back(its.vertices[vi]);
                 result[it->second].inner_loops.push_back(std::move(inner));
+                BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Step 6: assigned island loop "
+                    << il.loop_idx << " (" << loops[il.loop_idx].size()
+                    << " verts) to hole " << it->second;
             }
             break; // Each island belongs to exactly one parent hole.
         }
@@ -613,7 +616,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
                     result[hi].inner_loops.push_back(std::move(inner));
                     islands_found++;
 
-                    BOOST_LOG_TRIVIAL(debug) << "[HoleFinder] Found disconnected island ("
+                    BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Found disconnected island ("
                         << island_faces.size() << " faces, " << isl_verts.size()
                         << " verts, plane_d=" << face_d
                         << ", centroid_2d=(" << icx << "," << icy << ")"
@@ -623,7 +626,7 @@ std::vector<HoleBoundary> find_hole_boundaries(
             }
         }
 
-        BOOST_LOG_TRIVIAL(debug) << "[HoleFinder] Step 7: scanned "
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Step 7: scanned "
             << regions_scanned << " coplanar regions, found "
             << islands_found << " disconnected islands"
             << " (main_plane_d=" << main_plane_d
@@ -631,6 +634,16 @@ std::vector<HoleBoundary> find_hole_boundaries(
             << skipped_normal << " normal, " << skipped_plane << " plane)";
     }
 
+
+    // Final summary of all boundaries and their inner loops.
+    for (int ri = 0; ri < (int)result.size(); ++ri) {
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFinder] Result[" << ri << "]: "
+            << result[ri].loop.size() << " outer verts, "
+            << result[ri].inner_loops.size() << " inner_loops"
+            << " (normal=" << result[ri].plane_normal.x()
+            << "," << result[ri].plane_normal.y()
+            << "," << result[ri].plane_normal.z() << ")";
+    }
     return result;
 }
 
