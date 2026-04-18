@@ -124,6 +124,9 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
         poly_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
     }
 
+    // Detect original 2D winding before canonicalisation.
+    bool outer_is_ccw = poly_2d.is_counter_clockwise();
+
     // Ensure CCW orientation (for correct triangulation normals).
     if (poly_2d.is_clockwise())
         poly_2d.reverse();
@@ -138,6 +141,9 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
 
     // Add inner loops (e.g., the counter inside letter "A") as holes in the ExPolygon.
     // These regions will NOT be filled — they stay as part of the original surface.
+    // Track original winding of each inner loop so side walls match cap edges.
+    std::vector<bool> inner_is_ccw;
+    inner_is_ccw.reserve(boundary.inner_loops.size());
     for (const auto &inner : boundary.inner_loops) {
         Polygon hole_2d;
         hole_2d.points.reserve(inner.size());
@@ -145,11 +151,15 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
             Vec2d p = project_to_2d(pt, origin, u, v);
             hole_2d.points.emplace_back(Point(scale_(p.x()), scale_(p.y())));
         }
+        inner_is_ccw.push_back(hole_2d.is_counter_clockwise());
         // Holes in ExPolygon must be CW (opposite of contour).
         if (hole_2d.is_counter_clockwise())
             hole_2d.reverse();
         expoly.holes.push_back(std::move(hole_2d));
     }
+
+    BOOST_LOG_TRIVIAL(warning) << "[PlugGen] Winding: outer_is_ccw=" << outer_is_ccw
+        << ", inner_is_ccw count=" << inner_is_ccw.size();
 
     // ── Step 2: Triangulate the cap face ────────────────────────────────
     BOOST_LOG_TRIVIAL(warning) << "[PlugGen] ExPolygon contour: " << expoly.contour.points.size()
@@ -180,25 +190,36 @@ TriangleMesh generate_plug(const HoleBoundary &boundary, float depth)
 
     // ── 3c: Side walls for outer boundary ──
     // Each edge is Z-subdivided to avoid slicer zigzag artifacts.
+    // If the original loop was CW in UV, the tessellator reversed it to CCW.
+    // The cap's boundary edges now traverse opposite to the raw loop order,
+    // so side walls must also reverse to keep shared edges manifold.
     int total_side_tris = 0;
     for (int i = 0; i < n; ++i) {
         int i_next = (i + 1) % n;
         size_t before = faces.size();
         emit_side_wall_quads(loop[i], loop[i_next], offset,
-                             /*reverse_winding=*/false, vertices, faces);
+                             /*reverse_winding=*/!outer_is_ccw, vertices, faces);
         total_side_tris += (int)(faces.size() - before);
     }
 
     // ── 3c-2: Side walls for inner loops (island holes) ──
-    // Reversed winding: the "outside" of an inner hole faces inward.
-    for (const auto &inner : boundary.inner_loops) {
+    // Inner holes are canonicalised to CW by the ExPolygon builder.
+    // If the original inner loop was already CW, side walls match as-is
+    // (reverse_winding=true for "inward-facing" normals).
+    // If it was CCW, the canonicalisation flipped it, so side walls
+    // must NOT reverse (the flip already matches).
+    for (size_t idx = 0; idx < boundary.inner_loops.size(); ++idx) {
+        const auto &inner = boundary.inner_loops[idx];
         int in_n = (int)inner.size();
         if (in_n < 3) continue;
 
+        // Original CCW → canonicalised to CW (flipped) → side walls need normal winding
+        // Original CW  → kept as CW (no flip) → side walls need reversed winding
+        bool reverse = (idx < inner_is_ccw.size()) ? !inner_is_ccw[idx] : true;
         for (int i = 0; i < in_n; ++i) {
             int i_next = (i + 1) % in_n;
             emit_side_wall_quads(inner[i], inner[i_next], offset,
-                                 /*reverse_winding=*/true, vertices, faces);
+                                 /*reverse_winding=*/reverse, vertices, faces);
         }
     }
 
