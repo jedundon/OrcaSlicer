@@ -7,6 +7,7 @@
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/Selection.hpp"
 #include "slic3r/GUI/Camera.hpp"
+#include "slic3r/GUI/MeshUtils.hpp"
 #include "slic3r/GUI/NotificationManager.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "slic3r/GUI/format.hpp"
@@ -105,6 +106,7 @@ void GLGizmoHoleFill::data_changed(bool /*is_serializing*/)
 {
     init_extruders_data();
     reset_hover_state();
+    m_multi_raycasters.clear();
     // A selection change mid-preview would desync the batch state; abandon it.
     if (m_batch_state == BatchState::Preview)
         cancel_batch();
@@ -122,6 +124,8 @@ void GLGizmoHoleFill::reset_hover_state()
     m_hover_hole_valid = false;
     m_hover_facet      = -1;
     m_hover_mesh_id    = -1;
+    m_hover_object_idx   = -1;
+    m_hover_instance_idx = -1;
     m_hover_outline_mesh.reset();
     m_hover_fill_mesh.reset();
     m_hover_is_plug             = false;
@@ -201,41 +205,141 @@ bool GLGizmoHoleFill::pick_mesh(const Vec2d& mouse_position, RaycastResult& out)
     return true;
 }
 
+bool GLGizmoHoleFill::pick_mesh_multi(const Vec2d& mouse_position, RaycastResult& out)
+{
+    out = RaycastResult{};
+
+    const Selection& selection = m_parent.get_selection();
+    if (selection.is_empty())
+        return false;
+
+    const Model* model = selection.get_model();
+    if (!model)
+        return false;
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    const auto& content = selection.get_content();
+
+    float best_depth = std::numeric_limits<float>::max();
+    int   best_mesh  = -1;
+    size_t best_facet = 0;
+    Vec3f  best_hit  = Vec3f::Zero();
+    int    best_obj  = -1;
+    int    best_inst = -1;
+
+    for (const auto& [obj_idx, inst_idxs] : content) {
+        if (obj_idx < 0 || obj_idx >= (int)model->objects.size())
+            continue;
+        const ModelObject* mo = model->objects[obj_idx];
+        if (!mo || mo->instances.empty())
+            continue;
+
+        // Use the first selected instance for raycasting.
+        int inst_idx = inst_idxs.empty() ? 0 : *inst_idxs.begin();
+        if (inst_idx < 0 || inst_idx >= (int)mo->instances.size())
+            continue;
+        const ModelInstance* mi = mo->instances[inst_idx];
+
+        int mesh_id = -1;
+        for (int vi = 0; vi < (int)mo->volumes.size(); ++vi) {
+            const ModelVolume* mv = mo->volumes[vi];
+            if (!mv->is_model_part())
+                continue;
+            ++mesh_id;
+
+            // Get or create cached raycaster for this volume.
+            auto key = std::make_pair(obj_idx, vi);
+            auto it = m_multi_raycasters.find(key);
+            if (it == m_multi_raycasters.end()) {
+                it = m_multi_raycasters.emplace(key,
+                    std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(mv->mesh()))).first;
+            }
+            const MeshRaycaster* rc = it->second.get();
+            if (!rc)
+                continue;
+
+            Transform3d trafo = mi->get_transformation().get_matrix() * mv->get_matrix();
+            Vec3f  hit_pos;
+            Vec3f  hit_normal;
+            size_t facet_idx = 0;
+            if (!rc->unproject_on_mesh(mouse_position, trafo, camera, hit_pos, hit_normal, nullptr, &facet_idx))
+                continue;
+
+            Vec3d world_hit = trafo * hit_pos.cast<double>();
+            Vec3d view_pt   = camera.get_view_matrix() * world_hit;
+            float depth     = float(-view_pt.z());
+            if (depth < best_depth) {
+                best_depth = depth;
+                best_mesh  = mesh_id;
+                best_facet = facet_idx;
+                best_hit   = hit_pos;
+                best_obj   = obj_idx;
+                best_inst  = inst_idx;
+            }
+        }
+    }
+
+    if (best_mesh < 0)
+        return false;
+
+    out.mesh_id      = best_mesh;
+    out.facet        = int(best_facet);
+    out.hit          = best_hit;
+    out.object_idx   = best_obj;
+    out.instance_idx = best_inst;
+    return true;
+}
+
 void GLGizmoHoleFill::update_hover(const Vec2d& mouse_position)
 {
     RaycastResult rr;
-    if (!pick_mesh(mouse_position, rr)) {
+    const bool multi = is_batch_selection();
+    bool hit = multi ? pick_mesh_multi(mouse_position, rr)
+                     : pick_mesh(mouse_position, rr);
+    if (!hit) {
         m_hover_hole_valid   = false;
         m_hover_facet        = -1;
         m_hover_mesh_id      = -1;
         m_hover_is_plug      = false;
         m_hover_plug_raw_idx = -1;
+        m_hover_object_idx   = -1;
+        m_hover_instance_idx = -1;
         m_rr = RaycastResult{};
         return;
     }
     m_rr = rr;
+    m_hover_object_idx   = rr.object_idx;
+    m_hover_instance_idx = rr.instance_idx;
 
     // Detect whether the hit is on an existing HoleFill_ plug volume.
     // HoleFill_neg_ volumes are negatives and should not enter remove mode.
     m_hover_is_plug      = false;
     m_hover_plug_raw_idx = -1;
-    if (m_c && m_c->selection_info()) {
-        if (const ModelObject* mo = m_c->selection_info()->model_object()) {
-            int model_part_idx = 0;
-            for (int vi = 0; vi < (int)mo->volumes.size(); ++vi) {
-                const ModelVolume* mv = mo->volumes[vi];
-                if (!mv->is_model_part())
-                    continue;
-                if (model_part_idx == m_rr.mesh_id) {
-                    if (mv->name.rfind("HoleFill_", 0) == 0 &&
-                        mv->name.rfind("HoleFill_neg_", 0) != 0) {
-                        m_hover_is_plug      = true;
-                        m_hover_plug_raw_idx = vi;
-                    }
-                    break;
+
+    const ModelObject* mo = nullptr;
+    if (multi) {
+        const Model* model = m_parent.get_selection().get_model();
+        if (model && rr.object_idx >= 0 && rr.object_idx < (int)model->objects.size())
+            mo = model->objects[rr.object_idx];
+    } else if (m_c && m_c->selection_info()) {
+        mo = m_c->selection_info()->model_object();
+    }
+
+    if (mo) {
+        int model_part_idx = 0;
+        for (int vi = 0; vi < (int)mo->volumes.size(); ++vi) {
+            const ModelVolume* mv = mo->volumes[vi];
+            if (!mv->is_model_part())
+                continue;
+            if (model_part_idx == m_rr.mesh_id) {
+                if (mv->name.rfind("HoleFill_", 0) == 0 &&
+                    mv->name.rfind("HoleFill_neg_", 0) != 0) {
+                    m_hover_is_plug      = true;
+                    m_hover_plug_raw_idx = vi;
                 }
-                ++model_part_idx;
+                break;
             }
+            ++model_part_idx;
         }
     }
 }
@@ -734,15 +838,32 @@ void GLGizmoHoleFill::enter_batch_preview(const Vec2d& mouse_position)
     // Phase 1: capture the reference hole and transition to Preview state.
     // Discovery across other objects/instances arrives in Phase 2.
     RaycastResult rr;
-    if (!pick_mesh(mouse_position, rr))
+    const bool multi = is_batch_selection();
+    bool hit = multi ? pick_mesh_multi(mouse_position, rr)
+                     : pick_mesh(mouse_position, rr);
+    if (!hit)
         return;
 
     const Selection& selection = m_parent.get_selection();
-    const ModelObject* mo = m_c->selection_info()->model_object();
-    if (!mo)
-        return;
 
-    int object_idx = selection.get_object_idx();
+    // Resolve the ModelObject for the hit — either from multi-raycast result or SelectionInfo.
+    const ModelObject* mo = nullptr;
+    int object_idx = -1;
+    int inst_idx   = -1;
+    if (multi && rr.object_idx >= 0) {
+        const Model* model = selection.get_model();
+        if (model && rr.object_idx < (int)model->objects.size()) {
+            mo = model->objects[rr.object_idx];
+            object_idx = rr.object_idx;
+            inst_idx   = rr.instance_idx;
+        }
+    } else {
+        mo = m_c->selection_info()->model_object();
+        object_idx = selection.get_object_idx();
+        inst_idx   = selection.get_instance_idx();
+    }
+    if (!mo || object_idx < 0)
+        return;
 
     // Map mesh_id (model-part index) back to a ModelVolume.
     int model_part_idx = 0;
@@ -779,11 +900,11 @@ void GLGizmoHoleFill::enter_batch_preview(const Vec2d& mouse_position)
     Vec3f v2 = its.vertices[tri[2]];
     Vec3f local_n = (v1 - v0).cross(v2 - v0).normalized();
 
-    const Selection::IndicesList& idxs = selection.get_volume_idxs();
-    if (idxs.empty())
+    // Compute world transform from model data (works for both single and multi-select).
+    if (inst_idx < 0) inst_idx = 0;
+    if (inst_idx >= (int)mo->instances.size())
         return;
-    const GLVolume* gl_vol = selection.get_volume(*idxs.begin());
-    Transform3d trafo = gl_vol->world_matrix();
+    Transform3d trafo = mo->instances[inst_idx]->get_transformation().get_matrix() * vol->get_matrix();
     m_batch_ref_world_normal = (trafo.linear().inverse().transpose().cast<float>() * local_n).normalized();
 
     m_batch_state = BatchState::Preview;
@@ -1076,7 +1197,14 @@ void GLGizmoHoleFill::render_remove_hover()
     if (!m_hover_is_plug || m_hover_plug_raw_idx < 0)
         return;
 
-    const ModelObject* mo = m_c->selection_info()->model_object();
+    const ModelObject* mo = nullptr;
+    if (m_hover_object_idx >= 0) {
+        const Model* model = m_parent.get_selection().get_model();
+        if (model && m_hover_object_idx < (int)model->objects.size())
+            mo = model->objects[m_hover_object_idx];
+    } else if (m_c && m_c->selection_info()) {
+        mo = m_c->selection_info()->model_object();
+    }
     if (!mo || m_hover_plug_raw_idx >= (int)mo->volumes.size())
         return;
 
@@ -1085,7 +1213,7 @@ void GLGizmoHoleFill::render_remove_hover()
         return;
 
     const Selection& selection = m_parent.get_selection();
-    int inst_idx = selection.get_instance_idx();
+    int inst_idx = (m_hover_instance_idx >= 0) ? m_hover_instance_idx : selection.get_instance_idx();
     if (inst_idx < 0 || inst_idx >= int(mo->instances.size()))
         return;
 
@@ -1159,7 +1287,14 @@ void GLGizmoHoleFill::render_hole_fill_hover()
         return;
     }
 
-    const ModelObject* mo = m_c->selection_info()->model_object();
+    const ModelObject* mo = nullptr;
+    if (m_hover_object_idx >= 0) {
+        const Model* model = m_parent.get_selection().get_model();
+        if (model && m_hover_object_idx < (int)model->objects.size())
+            mo = model->objects[m_hover_object_idx];
+    } else if (m_c && m_c->selection_info()) {
+        mo = m_c->selection_info()->model_object();
+    }
     if (!mo) return;
 
     const Selection& selection = m_parent.get_selection();
@@ -1309,8 +1444,7 @@ void GLGizmoHoleFill::render_hole_fill_hover()
         return;
 
     // Render using the volume's world transform.
-    // W1 fix: guard against invalid instance index
-    int inst_idx = selection.get_instance_idx();
+    int inst_idx = (m_hover_instance_idx >= 0) ? m_hover_instance_idx : selection.get_instance_idx();
     if (inst_idx < 0 || inst_idx >= int(mo->instances.size())) { m_hover_hole_valid = false; return; }
     const ModelInstance* mi = mo->instances[inst_idx];
     Transform3d model_trafo = mi->get_transformation().get_matrix() * hit_volume->get_matrix();

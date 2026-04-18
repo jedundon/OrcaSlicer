@@ -7,12 +7,15 @@
 
 #include <vector>
 #include <map>
+#include <memory>
 
 namespace Slic3r {
 
 class ModelVolume;
 
 namespace GUI {
+
+class MeshRaycaster;
 
 class GLGizmoHoleFill : public GLGizmoBase
 {
@@ -101,8 +104,18 @@ private:
         int   mesh_id = -1;
         int   facet   = -1;
         Vec3f hit     = Vec3f::Zero();
+        int   object_idx   = -1;  // set by pick_mesh_multi
+        int   instance_idx = -1;  // set by pick_mesh_multi
     };
     RaycastResult m_rr;
+
+    // Track which object the hover is on (for multi-select rendering).
+    int m_hover_object_idx   = -1;
+    int m_hover_instance_idx = -1;
+
+    // Raycaster cache for multi-object picking (BVH is expensive to build).
+    // Keyed by (object_idx, volume_raw_idx). Cleared in data_changed().
+    std::map<std::pair<int,int>, std::unique_ptr<MeshRaycaster>> m_multi_raycasters;
 
     static const constexpr float HoleFillDepthMin    = 0.2f;
     static const constexpr float HoleFillDepthMax    = 5.0f;
@@ -121,6 +134,7 @@ private:
     void render_hole_fill_hover();
     void render_remove_hover();
     bool pick_mesh(const Vec2d& mouse_position, RaycastResult& out) const;
+    bool pick_mesh_multi(const Vec2d& mouse_position, RaycastResult& out);
     void reset_hover_state();
     void init_extruders_data();
 
