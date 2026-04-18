@@ -912,6 +912,8 @@ void GLGizmoHoleFill::enter_batch_preview(const Vec2d& mouse_position)
 
     discover_batch_matches();
 
+    BOOST_LOG_TRIVIAL(info) << "[HoleFill] enter_batch_preview done: preview.size()=" << m_batch_preview.size();
+
     m_parent.set_as_dirty();
 }
 
@@ -921,6 +923,14 @@ void GLGizmoHoleFill::discover_batch_matches()
 
     const Selection& selection = m_parent.get_selection();
     const auto& content = selection.get_content();
+
+    BOOST_LOG_TRIVIAL(info) << "[HoleFill] discover_batch_matches: content.size()=" << content.size()
+        << " ref_obj=" << m_batch_ref_object_idx
+        << " ref_vol=" << m_batch_ref_volume_idx
+        << " ref_facet=" << m_batch_ref_facet
+        << " ref_normal=(" << m_batch_ref_world_normal.x() << "," << m_batch_ref_world_normal.y() << "," << m_batch_ref_world_normal.z() << ")"
+        << " scope=" << (int)m_batch_scope
+        << " all_instances=" << m_batch_all_instances;
 
     const float cos_tol = std::cos(m_angle_tolerance * (float)M_PI / 180.0f);
     // 0.5 mm plane distance tolerance for SingleSurface (matches remove-all heuristic).
@@ -998,6 +1008,9 @@ void GLGizmoHoleFill::discover_batch_matches()
                 Transform3d    trafo       = mi->get_transformation().get_matrix() * vol->get_matrix();
                 Eigen::Matrix3f normal_mat = trafo.linear().inverse().transpose().cast<float>();
 
+                BOOST_LOG_TRIVIAL(info) << "[HoleFill] discover obj=" << obj_idx << " inst=" << inst_idx
+                    << " vol=" << vi << " name=" << vol->name << " tris=" << its.indices.size();
+
                 // Pick at most one seed per unique quantized local-normal direction.
                 // Disconnected coplanar islands with identical normals collapse to one
                 // seed — a v1 limitation, acceptable here.
@@ -1038,9 +1051,13 @@ void GLGizmoHoleFill::discover_batch_matches()
                         seeds.push_back(fi);
                 }
 
+                BOOST_LOG_TRIVIAL(info) << "[HoleFill] discover obj=" << obj_idx << " vol=" << vi
+                    << " seeds=" << seeds.size();
+
                 for (int seed_fi : seeds) {
                     std::vector<HoleBoundary> boundaries =
                         find_hole_boundaries(its, seed_fi, m_angle_tolerance);
+                    BOOST_LOG_TRIVIAL(info) << "[HoleFill] seed=" << seed_fi << " boundaries=" << boundaries.size();
                     if (boundaries.empty())
                         continue;
 
