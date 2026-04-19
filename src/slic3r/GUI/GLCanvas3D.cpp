@@ -3005,7 +3005,12 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
     if (m_selection.is_empty()) {
         // If no object is selected, deactivate the active gizmo, if any
         // Otherwise it may be shown after cleaning the scene (if it was active while the objects were deleted)
-        m_gizmos.reset_all_states();
+        // BUT: if a gizmo is currently On (user-activated), don't kill it —
+        // the selection may be transiently empty during a model update that
+        // the gizmo itself initiated (e.g. batch fill adding volumes).
+        if (m_gizmos.get_current_type() == GLGizmosManager::Undefined ||
+            !m_gizmos.get_current()->is_activable())
+            m_gizmos.reset_all_states();
         // BBS
 #if 0
         // If no object is selected, reset the objects manipulator on the sidebar
@@ -4693,7 +4698,9 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         m_mouse.position = pos.cast<double>();
 
         // updates gizmos overlay
-        if (m_selection.is_empty())
+        if (m_selection.is_empty() &&
+            (m_gizmos.get_current_type() == GLGizmosManager::Undefined ||
+             !m_gizmos.get_current()->is_activable()))
             m_gizmos.reset_all_states();
 
         m_dirty = true;
