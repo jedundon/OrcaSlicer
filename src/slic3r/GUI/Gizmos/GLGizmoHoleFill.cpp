@@ -70,6 +70,13 @@ std::string GLGizmoHoleFill::on_get_name() const
 
 bool GLGizmoHoleFill::on_is_activable() const
 {
+    // During batch fill update cycles, reload_scene() transiently empties
+    // the multi-object selection.  Keep the gizmo alive until the deferred
+    // CallAfter clears the flag.
+    if (m_suppress_deactivation) {
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_is_activable: suppressed during batch update";
+        return true;
+    }
     const Selection& selection = m_parent.get_selection();
     bool result = !selection.is_empty()
         && (selection.is_single_full_instance()
@@ -1022,12 +1029,29 @@ void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
     }
 
     // Only call plater()->update() when we actually added volumes.
-    // When filled == 0 (all duplicates or failures), the model is unchanged
-    // and update() would just trigger a destructive reload_scene() that wipes
-    // the multi-object selection and kills the gizmo for no reason.
     if (filled > 0) {
+        // Capture selected object indices BEFORE update — reload_scene may
+        // empty the selection when new GLVolumes don't match old geometry_ids.
+        std::vector<int> selected_obj_idxs;
+        for (const auto& [obj_idx, inst_set] : selection.get_content())
+            selected_obj_idxs.push_back(obj_idx);
+
         m_suppress_data_changed = true;
+        m_suppress_deactivation = true;
         wxGetApp().plater()->update();
+
+        // Re-assert multi-object selection immediately after the synchronous
+        // part of update().
+        m_parent.get_selection().add_object_from_idx(selected_obj_idxs);
+
+        // Defer clearing the suppress flag until ALL pending async events
+        // (EVT_GLCANVAS_OBJECT_SELECT etc.) have been processed.  Also do a
+        // final re-select in case async events wiped the selection again.
+        wxGetApp().CallAfter([this, selected_obj_idxs]() {
+            if (m_parent.get_selection().is_empty())
+                m_parent.get_selection().add_object_from_idx(selected_obj_idxs);
+            m_suppress_deactivation = false;
+        });
 
         for (int oi : touched_objects)
             wxGetApp().obj_list()->update_info_items((size_t)oi);
