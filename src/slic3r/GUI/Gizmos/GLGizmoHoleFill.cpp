@@ -117,7 +117,20 @@ CommonGizmosDataID GLGizmoHoleFill::on_get_requirements() const
 
 void GLGizmoHoleFill::on_set_state()
 {
-    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_set_state: state=" << (int)m_state;
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_set_state: state=" << (int)m_state
+                               << " suppress_data_changed=" << m_suppress_data_changed;
+
+    // During our own plater()->update() cycle, reload_scene() may empty the
+    // selection and call reset_all_states() → activate_gizmo(Undefined) →
+    // set_state(Off).  This is a transient state — veto the deactivation.
+    // activate_gizmo() checks get_state() after set_state() returns and will
+    // abort if we're still On.
+    if (m_state == Off && m_performing_update) {
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_set_state: VETOING deactivation during update cycle";
+        m_state = On;
+        return;
+    }
+
     if (m_state == Off)
         reset_hover_state();
 }
@@ -1031,16 +1044,23 @@ void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
     // Only call plater()->update() when we actually added volumes.
     if (filled > 0) {
         // Capture selected object indices BEFORE update — reload_scene may
-        // transiently empty the selection (on_is_activable keeps gizmo alive).
+        // transiently empty the selection.
         std::vector<int> selected_obj_idxs;
         for (const auto& [obj_idx, inst_set] : selection.get_content())
             selected_obj_idxs.push_back(obj_idx);
 
         m_suppress_data_changed = true;
+        m_performing_update = true;
         wxGetApp().plater()->update();
 
         // Re-assert multi-object selection after update.
         m_parent.get_selection().add_object_from_idx(selected_obj_idxs);
+
+        // Clear the update flag after ALL pending events (including async
+        // EVT_GLCANVAS_OBJECT_SELECT) have been processed.
+        wxGetApp().CallAfter([this]() {
+            m_performing_update = false;
+        });
 
         for (int oi : touched_objects)
             wxGetApp().obj_list()->update_info_items((size_t)oi);
