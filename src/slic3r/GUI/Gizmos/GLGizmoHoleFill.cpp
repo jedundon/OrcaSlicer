@@ -1021,8 +1021,18 @@ void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
         ++filled;
     }
 
+    // Capture all selected object indices BEFORE update — reload_scene may
+    // empty the selection when new GLVolumes don't match old geometry_ids.
+    std::vector<int> selected_obj_idxs;
+    for (const auto& [obj_idx, inst_set] : selection.get_content())
+        selected_obj_idxs.push_back(obj_idx);
+
     m_suppress_data_changed = true;
     wxGetApp().plater()->update();
+
+    // Re-assert multi-object selection so reload_scene's async events
+    // don't find an empty selection and deactivate the gizmo.
+    m_parent.get_selection().add_object_from_idx(selected_obj_idxs);
 
     for (int oi : touched_objects)
         wxGetApp().obj_list()->update_info_items((size_t)oi);
