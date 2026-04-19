@@ -1048,8 +1048,10 @@ void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
         // (EVT_GLCANVAS_OBJECT_SELECT etc.) have been processed.  Also do a
         // final re-select in case async events wiped the selection again.
         wxGetApp().CallAfter([this, selected_obj_idxs]() {
-            if (m_parent.get_selection().is_empty())
-                m_parent.get_selection().add_object_from_idx(selected_obj_idxs);
+            if (m_parent.get_selection().is_empty()) {
+                std::vector<int> idxs = selected_obj_idxs;
+                m_parent.get_selection().add_object_from_idx(idxs);
+            }
             m_suppress_deactivation = false;
         });
 
