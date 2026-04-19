@@ -70,6 +70,13 @@ std::string GLGizmoHoleFill::on_get_name() const
 
 bool GLGizmoHoleFill::on_is_activable() const
 {
+    // During our own plater()->update() cycle the selection is transiently
+    // empty.  Suppress the activability check so refresh_on_off_state()
+    // inside reload_scene() doesn't kill us.
+    if (m_suppress_deactivation) {
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_is_activable: suppressed during batch fill";
+        return true;
+    }
     const Selection& selection = m_parent.get_selection();
     bool result = !selection.is_empty()
         && (selection.is_single_full_instance()
@@ -1028,11 +1035,13 @@ void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
         selected_obj_idxs.push_back(obj_idx);
 
     m_suppress_data_changed = true;
+    m_suppress_deactivation = true;
     wxGetApp().plater()->update();
 
     // Re-assert multi-object selection so reload_scene's async events
     // don't find an empty selection and deactivate the gizmo.
     m_parent.get_selection().add_object_from_idx(selected_obj_idxs);
+    m_suppress_deactivation = false;
 
     for (int oi : touched_objects)
         wxGetApp().obj_list()->update_info_items((size_t)oi);
