@@ -118,21 +118,24 @@ CommonGizmosDataID GLGizmoHoleFill::on_get_requirements() const
 void GLGizmoHoleFill::on_set_state()
 {
     BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_set_state: state=" << (int)m_state
-                               << " suppress_data_changed=" << m_suppress_data_changed;
+                               << " batch_fill_done=" << m_batch_fill_done
+                               << " sel_empty=" << m_parent.get_selection().is_empty();
 
-    // During our own plater()->update() cycle, reload_scene() may empty the
-    // selection and call reset_all_states() → activate_gizmo(Undefined) →
-    // set_state(Off).  This is a transient state — veto the deactivation.
-    // activate_gizmo() checks get_state() after set_state() returns and will
-    // abort if we're still On.
-    if (m_state == Off && m_performing_update) {
-        BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_set_state: VETOING deactivation during update cycle";
+    // After a batch fill, reload_scene() may transiently empty the selection
+    // and call reset_all_states() → activate_gizmo(Undefined) → set_state(Off).
+    // Veto this deactivation: if we've done a batch fill and the selection is
+    // empty, this is a transient state, not a user action.  Real user actions
+    // (clicking the gizmo button, clicking elsewhere) have a non-empty selection.
+    if (m_state == Off && m_batch_fill_done && m_parent.get_selection().is_empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_set_state: VETOING deactivation — transient empty selection after batch fill";
         m_state = On;
         return;
     }
 
-    if (m_state == Off)
+    if (m_state == Off) {
+        m_batch_fill_done = false;
         reset_hover_state();
+    }
 }
 
 void GLGizmoHoleFill::data_changed(bool /*is_serializing*/)
@@ -1050,17 +1053,11 @@ void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
             selected_obj_idxs.push_back(obj_idx);
 
         m_suppress_data_changed = true;
-        m_performing_update = true;
+        m_batch_fill_done = true;
         wxGetApp().plater()->update();
 
         // Re-assert multi-object selection after update.
         m_parent.get_selection().add_object_from_idx(selected_obj_idxs);
-
-        // Clear the update flag after ALL pending events (including async
-        // EVT_GLCANVAS_OBJECT_SELECT) have been processed.
-        wxGetApp().CallAfter([this]() {
-            m_performing_update = false;
-        });
 
         for (int oi : touched_objects)
             wxGetApp().obj_list()->update_info_items((size_t)oi);

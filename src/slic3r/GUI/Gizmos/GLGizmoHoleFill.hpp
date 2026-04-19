@@ -120,7 +120,7 @@ private:
     // When true, data_changed() skips destructive resets (raycaster clear,
     // batch state reset) so that consecutive batch fills don't lose the cache.
     bool m_suppress_data_changed = false;
-    bool m_performing_update = false;
+    bool m_batch_fill_done = false;
 
     static const constexpr float HoleFillDepthMin    = 0.2f;
     static const constexpr float HoleFillDepthMax    = 5.0f;
