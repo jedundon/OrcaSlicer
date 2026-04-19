@@ -1041,7 +1041,28 @@ void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
     // Re-assert multi-object selection so reload_scene's async events
     // don't find an empty selection and deactivate the gizmo.
     m_parent.get_selection().add_object_from_idx(selected_obj_idxs);
-    m_suppress_deactivation = false;
+
+    // Don't clear m_suppress_deactivation synchronously — async events
+    // (EVT_GLCANVAS_OBJECT_SELECT etc.) keep calling on_is_activable()
+    // hundreds of ms after update() returns, by which time the re-asserted
+    // selection may have been wiped again.  Defer the clear to after all
+    // pending events in the current event-loop iteration have been processed.
+    wxGetApp().CallAfter([this]() {
+        m_suppress_deactivation = false;
+        // Final re-assertion: ensure selection is still valid after all events.
+        if (m_parent.get_selection().is_empty()) {
+            // Nothing selected — re-select all objects that have hole-fill volumes.
+            const auto& model = wxGetApp().plater()->model();
+            for (size_t oi = 0; oi < model.objects.size(); ++oi) {
+                for (const auto* vol : model.objects[oi]->volumes) {
+                    if (vol->is_negative_volume() || vol->is_modifier()) {
+                        m_parent.get_selection().add_object((unsigned int)oi, false);
+                        break;
+                    }
+                }
+            }
+        }
+    });
 
     for (int oi : touched_objects)
         wxGetApp().obj_list()->update_info_items((size_t)oi);
