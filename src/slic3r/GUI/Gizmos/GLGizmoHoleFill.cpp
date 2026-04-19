@@ -77,7 +77,15 @@ bool GLGizmoHoleFill::on_is_activable() const
             || selection.is_multiple_full_instance()
             || selection.is_multiple_full_object());
     if (!result)
-        BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_is_activable: FALSE, empty=" << selection.is_empty();
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_is_activable: FALSE"
+            << " empty=" << selection.is_empty()
+            << " single_full_inst=" << selection.is_single_full_instance()
+            << " any_vol=" << selection.is_any_volume()
+            << " multi_full_inst=" << selection.is_multiple_full_instance()
+            << " multi_full_obj=" << selection.is_multiple_full_object()
+            << " mixed=" << selection.is_mixed()
+            << " content_size=" << selection.get_content().size()
+            << " volume_count=" << selection.get_volume_idxs().size();
     return result;
 }
 
