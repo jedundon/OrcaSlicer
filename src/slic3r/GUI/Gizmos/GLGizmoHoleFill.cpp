@@ -71,11 +71,14 @@ std::string GLGizmoHoleFill::on_get_name() const
 bool GLGizmoHoleFill::on_is_activable() const
 {
     const Selection& selection = m_parent.get_selection();
-    return !selection.is_empty()
+    bool result = !selection.is_empty()
         && (selection.is_single_full_instance()
             || selection.is_any_volume()
             || selection.is_multiple_full_instance()
             || selection.is_multiple_full_object());
+    if (!result)
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_is_activable: FALSE, empty=" << selection.is_empty();
+    return result;
 }
 
 bool GLGizmoHoleFill::is_batch_selection() const
@@ -99,6 +102,7 @@ CommonGizmosDataID GLGizmoHoleFill::on_get_requirements() const
 
 void GLGizmoHoleFill::on_set_state()
 {
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] on_set_state: state=" << (int)m_state;
     if (m_state == Off)
         reset_hover_state();
 }
@@ -107,11 +111,16 @@ void GLGizmoHoleFill::data_changed(bool /*is_serializing*/)
 {
     init_extruders_data();
 
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] data_changed called, suppress=" << m_suppress_data_changed
+                               << " batch_state=" << (int)m_batch_state;
+
     // When our own plater()->update() triggers a scene reload we still need
     // fresh extruder colors, but clearing the raycaster cache and batch state
     // would break the next click in a consecutive same-color batch fill.
-    if (m_suppress_data_changed)
+    if (m_suppress_data_changed) {
+        m_suppress_data_changed = false;
         return;
+    }
 
     reset_hover_state();
     m_multi_raycasters.clear();
@@ -1006,7 +1015,6 @@ void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
 
     m_suppress_data_changed = true;
     wxGetApp().plater()->update();
-    m_suppress_data_changed = false;
 
     for (int oi : touched_objects)
         wxGetApp().obj_list()->update_info_items((size_t)oi);
