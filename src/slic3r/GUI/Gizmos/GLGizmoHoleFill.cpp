@@ -70,13 +70,6 @@ std::string GLGizmoHoleFill::on_get_name() const
 
 bool GLGizmoHoleFill::on_is_activable() const
 {
-    // Once the user has activated the gizmo, keep it alive even if the
-    // selection is transiently empty (e.g. during reload_scene() after
-    // batch fill).  The gizmo handles empty selection gracefully in its
-    // render/interaction code.  Only check selection for initial activation.
-    if (m_state == On) {
-        return true;
-    }
     const Selection& selection = m_parent.get_selection();
     bool result = !selection.is_empty()
         && (selection.is_single_full_instance()
@@ -128,16 +121,8 @@ void GLGizmoHoleFill::data_changed(bool /*is_serializing*/)
 {
     init_extruders_data();
 
-    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] data_changed called, suppress=" << m_suppress_data_changed
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] data_changed called"
                                << " batch_state=" << (int)m_batch_state;
-
-    // When our own plater()->update() triggers a scene reload we still need
-    // fresh extruder colors, but clearing the raycaster cache and batch state
-    // would break the next click in a consecutive same-color batch fill.
-    if (m_suppress_data_changed) {
-        m_suppress_data_changed = false;
-        return;
-    }
 
     reset_hover_state();
     m_multi_raycasters.clear();
@@ -540,6 +525,17 @@ void GLGizmoHoleFill::perform_hole_fill(const Vec2d& mouse_position)
         new_vol->config.set("extruder", (int)m_selected_extruder_idx + 1);
     new_vol->set_transformation(source_trafo);
 
+    // HF-40 fix: re-establish selection BEFORE plater()->update() so that
+    // reload_scene() doesn't find an empty selection and kill the gizmo.
+    // This follows the proven Emboss/SVG survival pattern.
+    wxGetApp().obj_list()->reorder_volumes_and_get_selection(
+        object_idx, [new_vol](const ModelVolume* v) { return v == new_vol; });
+    wxGetApp().obj_list()->selection_changed();
+    // Re-open gizmo if reorder closed it (on Linux, reorder triggers reload_scene
+    // which can close the gizmo — see GLGizmoEmboss.cpp:1903)
+    if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
+        m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
+
     wxGetApp().plater()->update();
     wxGetApp().obj_list()->update_info_items((size_t)object_idx);
 
@@ -580,10 +576,14 @@ void GLGizmoHoleFill::perform_hole_remove()
     ModelObject* mo_mut = wxGetApp().model().objects[object_idx];
     mo_mut->delete_volume((size_t)m_hover_plug_raw_idx);
 
-    wxGetApp().plater()->update();
-    // Re-select the object so reload_scene doesn't find an empty selection
-    // and deactivate the gizmo (the deleted GLVolume invalidated old indices).
+    // HF-40 fix: re-select BEFORE plater()->update() so reload_scene()
+    // doesn't find an empty selection and kill the gizmo.
     m_parent.get_selection().add_object((unsigned int)object_idx, true);
+    // Re-open gizmo if it was closed
+    if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
+        m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
+
+    wxGetApp().plater()->update();
     wxGetApp().obj_list()->update_info_items((size_t)object_idx);
 
     wxGetApp().plater()->get_notification_manager()->push_notification(
@@ -712,6 +712,11 @@ void GLGizmoHoleFill::perform_fill_all_on_surface(const Vec2d& mouse_position)
         existing_centers.push_back(plug_center);
         ++filled;
     }
+
+    // HF-40 fix: re-establish selection BEFORE plater()->update().
+    m_parent.get_selection().add_object((unsigned int)object_idx, true);
+    if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
+        m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
 
     wxGetApp().plater()->update();
     wxGetApp().obj_list()->update_info_items((size_t)object_idx);
@@ -853,8 +858,12 @@ void GLGizmoHoleFill::perform_remove_all_on_surface(const Vec2d& /*mouse_positio
     for (auto it = to_delete.rbegin(); it != to_delete.rend(); ++it)
         mo_mut->delete_volume((size_t)*it);
 
-    wxGetApp().plater()->update();
+    // HF-40 fix: re-select BEFORE plater()->update().
     m_parent.get_selection().add_object((unsigned int)object_idx, true);
+    if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
+        m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
+
+    wxGetApp().plater()->update();
     wxGetApp().obj_list()->update_info_items((size_t)object_idx);
 
     const int removed = (int)to_delete.size();
@@ -1032,17 +1041,15 @@ void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
 
     // Only call plater()->update() when we actually added volumes.
     if (filled > 0) {
-        // Capture selected object indices BEFORE update — reload_scene may
-        // transiently empty the selection.
+        // HF-40 fix: re-establish multi-object selection BEFORE update.
         std::vector<int> selected_obj_idxs;
         for (const auto& [obj_idx, inst_set] : selection.get_content())
             selected_obj_idxs.push_back(obj_idx);
-
-        m_suppress_data_changed = true;
-        wxGetApp().plater()->update();
-
-        // Re-assert multi-object selection after update.
         m_parent.get_selection().add_object_from_idx(selected_obj_idxs);
+        if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
+            m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
+
+        wxGetApp().plater()->update();
 
         for (int oi : touched_objects)
             wxGetApp().obj_list()->update_info_items((size_t)oi);
@@ -1430,6 +1437,14 @@ void GLGizmoHoleFill::commit_batch()
         existing_centers.push_back(plug_center);
         touched_objects.insert(entry.object_idx);
         ++filled;
+    }
+
+    // HF-40 fix: re-select BEFORE plater()->update().
+    if (!touched_objects.empty()) {
+        int first_obj = *touched_objects.begin();
+        m_parent.get_selection().add_object((unsigned int)first_obj, true);
+        if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
+            m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
     }
 
     wxGetApp().plater()->update();
