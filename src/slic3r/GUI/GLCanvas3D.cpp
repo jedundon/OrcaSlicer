@@ -2318,17 +2318,22 @@ void GLCanvas3D::select_all()
 
 void GLCanvas3D::deselect_all()
 {
+    // HF-40: if the current gizmo is user-activated (Emboss pattern),
+    // skip the ENTIRE deselect. Not only the gizmo state, but also the
+    // selection itself must be preserved — otherwise the gizmo enters a
+    // zombie state (active but with empty selection, UI broken).
+    // Transient empty-selection events during our own model reload after
+    // commit_batch() must not tear anything down.
+    if (m_gizmos.get_current_type() != GLGizmosManager::Undefined
+        && m_gizmos.get_current()->is_activable()) {
+        BOOST_LOG_TRIVIAL(warning) << "[HF40-diag] deselect_all SKIPPED (gizmo activable)";
+        return;
+    }
     m_selection.remove_all();
     // BBS
     //wxGetApp().obj_manipul()->set_dirty();
     BOOST_LOG_TRIVIAL(warning) << "[HF40-diag] deselect_all reset_all_states";
-    // HF-40: if the current gizmo is user-activated (Emboss pattern), don't
-    // kill it via reset_all_states(). The gizmo owns its own lifecycle; a
-    // transient empty selection (e.g., during model reload after our own
-    // batch commit) should not tear it down.
-    if (m_gizmos.get_current_type() == GLGizmosManager::Undefined ||
-        !m_gizmos.get_current()->is_activable())
-        m_gizmos.reset_all_states();
+    m_gizmos.reset_all_states();
     m_gizmos.update_data();
     post_event(SimpleEvent(EVT_GLCANVAS_OBJECT_SELECT));
 }
