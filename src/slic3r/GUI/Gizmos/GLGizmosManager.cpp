@@ -377,6 +377,12 @@ void GLGizmosManager::reset_all_states()
         return;
 
     const EType current = get_current_type();
+    // HF-40 diagnostic
+    if (current != Undefined && current < (int)m_gizmos.size()
+        && m_gizmos[current]->get_state() == GLGizmoBase::On) {
+        BOOST_LOG_TRIVIAL(warning) << "[GizmoMgr] reset_all_states called while "
+            << "current=" << (int)current << " is On";
+    }
     if (current != Undefined)
         // close any open gizmo
         open_gizmo(current);
@@ -1371,6 +1377,13 @@ void GLGizmosManager::update_hover_state(const EType &type)
 bool GLGizmosManager::activate_gizmo(EType type)
 {
     assert(!m_gizmos.empty());
+
+    // HF-40 diagnostic
+    if (m_current != Undefined && m_current != type && m_current < (int)m_gizmos.size()
+        && m_gizmos[m_current]->get_state() == GLGizmoBase::On) {
+        BOOST_LOG_TRIVIAL(warning) << "[GizmoMgr] activate_gizmo(" << (int)type
+            << ") will close current=" << (int)m_current;
+    }
 
     // already activated
     if (m_current == type) return true;

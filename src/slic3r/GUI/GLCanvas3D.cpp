@@ -3009,8 +3009,11 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
         // the selection may be transiently empty during a model update that
         // the gizmo itself initiated (e.g. batch fill adding volumes).
         if (m_gizmos.get_current_type() == GLGizmosManager::Undefined ||
-            !m_gizmos.get_current()->is_activable())
+            !m_gizmos.get_current()->is_activable()) {
+            BOOST_LOG_TRIVIAL(warning) << "[HF40-diag] reload_scene reset_all_states: current="
+                << (int)m_gizmos.get_current_type();
             m_gizmos.reset_all_states();
+        }
         // BBS
 #if 0
         // If no object is selected, reset the objects manipulator on the sidebar
