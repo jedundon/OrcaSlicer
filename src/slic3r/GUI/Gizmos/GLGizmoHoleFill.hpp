@@ -117,6 +117,11 @@ private:
     // Keyed by (object_idx, volume_raw_idx). Cleared in data_changed().
     std::map<std::pair<int,int>, std::unique_ptr<MeshRaycaster>> m_multi_raycasters;
 
+    // HF-40: object indices to re-select in data_changed() after reload_scene()
+    // rebuilds GLVolumes and wipes the selection. Set before plater()->update(),
+    // consumed (cleared) in data_changed().
+    std::vector<int> m_pending_reselect_objects;
+
 
     static const constexpr float HoleFillDepthMin    = 0.2f;
     static const constexpr float HoleFillDepthMax    = 5.0f;

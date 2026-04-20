@@ -70,6 +70,14 @@ std::string GLGizmoHoleFill::on_get_name() const
 
 bool GLGizmoHoleFill::on_is_activable() const
 {
+    // HF-40: When the gizmo is active and we have a pending re-selection
+    // (i.e. we're inside reload_scene() after our own plater()->update()),
+    // keep reporting activable so the framework doesn't kill us during
+    // the transient empty-selection window. data_changed() will restore
+    // the selection momentarily.
+    if (m_state == On && !m_pending_reselect_objects.empty())
+        return true;
+
     const Selection& selection = m_parent.get_selection();
     bool result = !selection.is_empty()
         && (selection.is_single_full_instance()
@@ -122,7 +130,26 @@ void GLGizmoHoleFill::data_changed(bool /*is_serializing*/)
     init_extruders_data();
 
     BOOST_LOG_TRIVIAL(warning) << "[HoleFill] data_changed called"
-                               << " batch_state=" << (int)m_batch_state;
+                               << " batch_state=" << (int)m_batch_state
+                               << " pending_reselect=" << m_pending_reselect_objects.size();
+
+    // HF-40: After our own plater()->update() triggers reload_scene(), the
+    // GLVolumes are rebuilt from scratch and the selection is wiped. We stashed
+    // the object indices before calling update(); now re-establish the selection
+    // so the gizmo stays alive.
+    if (!m_pending_reselect_objects.empty()) {
+        std::vector<int> objs = std::move(m_pending_reselect_objects);
+        m_pending_reselect_objects.clear();
+        if (objs.size() == 1)
+            m_parent.get_selection().add_object((unsigned int)objs[0], true);
+        else
+            m_parent.get_selection().add_object_from_idx(objs);
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFill] data_changed: re-selected " << objs.size() << " object(s)";
+        // Re-open gizmo if reload_scene closed it
+        if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
+            m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
+        return;
+    }
 
     reset_hover_state();
     m_multi_raycasters.clear();
@@ -525,7 +552,11 @@ void GLGizmoHoleFill::perform_hole_fill(const Vec2d& mouse_position)
         new_vol->config.set("extruder", (int)m_selected_extruder_idx + 1);
     new_vol->set_transformation(source_trafo);
 
-    // HF-40 fix: re-establish selection BEFORE plater()->update() so that
+    // HF-40 fix: stash the object index so data_changed() can re-select
+    // after reload_scene() rebuilds GLVolumes and wipes the selection.
+    m_pending_reselect_objects = { object_idx };
+
+    // Re-establish selection BEFORE plater()->update() so that
     // reload_scene() doesn't find an empty selection and kill the gizmo.
     // This follows the proven Emboss/SVG survival pattern.
     wxGetApp().obj_list()->reorder_volumes_and_get_selection(
@@ -576,8 +607,9 @@ void GLGizmoHoleFill::perform_hole_remove()
     ModelObject* mo_mut = wxGetApp().model().objects[object_idx];
     mo_mut->delete_volume((size_t)m_hover_plug_raw_idx);
 
-    // HF-40 fix: re-select BEFORE plater()->update() so reload_scene()
-    // doesn't find an empty selection and kill the gizmo.
+    // HF-40 fix: stash object index for data_changed() re-selection.
+    m_pending_reselect_objects = { object_idx };
+    // Also pre-select now so reload_scene() doesn't find empty selection.
     // Note: add_object() references stale GLVolumes (the deleted volume's
     // GLVolume still exists until reload_scene rebuilds them), but that's
     // fine — the selection just needs to be non-empty during the update cycle.
@@ -716,7 +748,9 @@ void GLGizmoHoleFill::perform_fill_all_on_surface(const Vec2d& mouse_position)
         ++filled;
     }
 
-    // HF-40 fix: re-establish selection BEFORE plater()->update().
+    // HF-40 fix: stash object index for data_changed() re-selection.
+    m_pending_reselect_objects = { object_idx };
+    // Also pre-select now.
     m_parent.get_selection().add_object((unsigned int)object_idx, true);
     if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
         m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
@@ -861,9 +895,10 @@ void GLGizmoHoleFill::perform_remove_all_on_surface(const Vec2d& /*mouse_positio
     for (auto it = to_delete.rbegin(); it != to_delete.rend(); ++it)
         mo_mut->delete_volume((size_t)*it);
 
-    // HF-40 fix: re-select BEFORE plater()->update().
-    // Stale GLVolumes from deleted volumes are still referenced but that's OK —
-    // selection just needs to be non-empty during reload_scene().
+    // HF-40 fix: stash object index for data_changed() re-selection.
+    m_pending_reselect_objects = { object_idx };
+    // Also pre-select now. Stale GLVolumes from deleted volumes are still
+    // referenced but that's OK — selection just needs to be non-empty during reload_scene().
     m_parent.get_selection().add_object((unsigned int)object_idx, true);
     if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
         m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
@@ -1046,10 +1081,11 @@ void GLGizmoHoleFill::perform_batch_fill(const Vec2d& mouse_position)
 
     // Only call plater()->update() when we actually added volumes.
     if (filled > 0) {
-        // HF-40 fix: re-establish multi-object selection BEFORE update.
+        // HF-40 fix: stash + re-establish multi-object selection BEFORE update.
         std::vector<int> selected_obj_idxs;
         for (const auto& [obj_idx, inst_set] : selection.get_content())
             selected_obj_idxs.push_back(obj_idx);
+        m_pending_reselect_objects = selected_obj_idxs;
         m_parent.get_selection().add_object_from_idx(selected_obj_idxs);
         if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
             m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
@@ -1451,6 +1487,7 @@ void GLGizmoHoleFill::commit_batch()
     // premature gizmo deactivation.
     if (!touched_objects.empty()) {
         std::vector<int> obj_idxs(touched_objects.begin(), touched_objects.end());
+        m_pending_reselect_objects = obj_idxs;
         m_parent.get_selection().add_object_from_idx(obj_idxs);
         if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
             m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
