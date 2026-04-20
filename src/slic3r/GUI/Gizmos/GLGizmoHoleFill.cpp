@@ -1511,12 +1511,12 @@ void GLGizmoHoleFill::commit_batch()
         NotificationManager::NotificationLevel::RegularNotificationLevel,
         msg);
 
-    // Close the gizmo after batch apply so the user gets immediate visual
-    // feedback (new volumes visible) and can re-open for the next face.
+    // HF-40: Do NOT close the gizmo after batch apply. The user wants to
+    // keep painting more holes without re-opening. The selection has been
+    // restored by perform_batch_fill / data_changed, so the gizmo can stay open.
     m_batch_state = BatchState::Inactive;
     clear_batch_preview();
     m_parent.set_as_dirty();
-    m_parent.get_gizmos_manager().reset_all_states();
 }
 
 void GLGizmoHoleFill::cancel_batch()
