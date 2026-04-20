@@ -380,12 +380,9 @@ void GLGizmosManager::reset_all_states()
     // HF-40 diagnostic: find who kills the gizmo
     if (current != Undefined && current < (int)m_gizmos.size()
         && m_gizmos[current]->get_state() == GLGizmoBase::On) {
-        void* caller0 = __builtin_return_address(0);
-        void* caller1 = __builtin_return_address(1);
-        void* caller2 = __builtin_return_address(2);
         BOOST_LOG_TRIVIAL(warning) << "[GizmoMgr] reset_all_states called while "
             << "current=" << (int)current << " is On"
-            << " callers=" << caller0 << "," << caller1 << "," << caller2;
+            << " caller=" << _ReturnAddress();
     }
     if (current != Undefined)
         // close any open gizmo
