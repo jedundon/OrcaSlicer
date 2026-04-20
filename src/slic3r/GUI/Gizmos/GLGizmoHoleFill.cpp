@@ -1493,11 +1493,16 @@ void GLGizmoHoleFill::commit_batch()
         std::vector<int> obj_idxs(touched_objects.begin(), touched_objects.end());
         m_pending_reselect_objects = obj_idxs;
         m_parent.get_selection().add_object_from_idx(obj_idxs);
+        BOOST_LOG_TRIVIAL(warning) << "[HoleFill] commit_batch re-select, current_gizmo="
+            << (int)m_parent.get_gizmos_manager().get_current_type();
         if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
             m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
     }
 
     wxGetApp().plater()->update();
+    BOOST_LOG_TRIVIAL(warning) << "[HoleFill] commit_batch after plater->update, current_gizmo="
+        << (int)m_parent.get_gizmos_manager().get_current_type()
+        << " state=" << (int)m_state;
     for (int obj_idx : touched_objects)
         wxGetApp().obj_list()->update_info_items((size_t)obj_idx);
 

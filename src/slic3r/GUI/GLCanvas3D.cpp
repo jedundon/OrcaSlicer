@@ -2321,6 +2321,7 @@ void GLCanvas3D::deselect_all()
     m_selection.remove_all();
     // BBS
     //wxGetApp().obj_manipul()->set_dirty();
+    BOOST_LOG_TRIVIAL(warning) << "[HF40-diag] deselect_all reset_all_states";
     m_gizmos.reset_all_states();
     m_gizmos.update_data();
     post_event(SimpleEvent(EVT_GLCANVAS_OBJECT_SELECT));
@@ -4169,8 +4170,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
     const bool mouse_in_layer_editing  = layer_editing_object_idx != -1 && m_layers_editing.bar_rect_contains(*this, pos(0), pos(1));
 
     if (!mouse_in_layer_editing && m_main_toolbar.on_mouse(evt, *this)) {
-        if (m_main_toolbar.is_any_item_pressed())
+        if (m_main_toolbar.is_any_item_pressed()) {
+            BOOST_LOG_TRIVIAL(warning) << "[HF40-diag] main_toolbar_press reset_all_states";
             m_gizmos.reset_all_states();
+        }
         if (evt.LeftUp() || evt.MiddleUp() || evt.RightUp())
             mouse_up_cleanup();
         m_mouse.set_start_position_3D_as_invalid();
@@ -4386,8 +4389,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 
                         // propagate event through callback
                         if (curr_idxs != m_selection.get_volume_idxs()) {
-                            if (m_selection.is_empty())
+                            if (m_selection.is_empty()) {
+                                BOOST_LOG_TRIVIAL(warning) << "[HF40-diag] on_mouse LClick empty-sel reset_all_states";
                                 m_gizmos.reset_all_states();
+                            }
                             else
                                 m_gizmos.refresh_on_off_state();
 
@@ -4703,8 +4708,11 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         // updates gizmos overlay
         if (m_selection.is_empty() &&
             (m_gizmos.get_current_type() == GLGizmosManager::Undefined ||
-             !m_gizmos.get_current()->is_activable()))
+             !m_gizmos.get_current()->is_activable())) {
+            BOOST_LOG_TRIVIAL(warning) << "[HF40-diag] on_mouse Moving empty-sel reset_all_states: current="
+                << (int)m_gizmos.get_current_type();
             m_gizmos.reset_all_states();
+        }
 
         m_dirty = true;
     }
@@ -9962,8 +9970,10 @@ void GLCanvas3D::_update_selection_from_hover()
             m_selection.remove(i);
     }
 
-    if (m_selection.is_empty())
+    if (m_selection.is_empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "[HF40-diag] select_by_rectangle empty-sel reset_all_states";
         m_gizmos.reset_all_states();
+    }
     else
         m_gizmos.refresh_on_off_state();
 
