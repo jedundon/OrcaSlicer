@@ -578,6 +578,9 @@ void GLGizmoHoleFill::perform_hole_remove()
 
     // HF-40 fix: re-select BEFORE plater()->update() so reload_scene()
     // doesn't find an empty selection and kill the gizmo.
+    // Note: add_object() references stale GLVolumes (the deleted volume's
+    // GLVolume still exists until reload_scene rebuilds them), but that's
+    // fine — the selection just needs to be non-empty during the update cycle.
     m_parent.get_selection().add_object((unsigned int)object_idx, true);
     // Re-open gizmo if it was closed
     if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
@@ -859,6 +862,8 @@ void GLGizmoHoleFill::perform_remove_all_on_surface(const Vec2d& /*mouse_positio
         mo_mut->delete_volume((size_t)*it);
 
     // HF-40 fix: re-select BEFORE plater()->update().
+    // Stale GLVolumes from deleted volumes are still referenced but that's OK —
+    // selection just needs to be non-empty during reload_scene().
     m_parent.get_selection().add_object((unsigned int)object_idx, true);
     if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
         m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
@@ -1439,10 +1444,14 @@ void GLGizmoHoleFill::commit_batch()
         ++filled;
     }
 
-    // HF-40 fix: re-select BEFORE plater()->update().
+    // HF-40 fix: re-select ALL touched objects BEFORE plater()->update().
+    // This is a transient survival mechanism — commit_batch() deliberately
+    // closes the gizmo via reset_all_states() after update(), but the
+    // selection must be non-empty DURING update()/reload_scene() to prevent
+    // premature gizmo deactivation.
     if (!touched_objects.empty()) {
-        int first_obj = *touched_objects.begin();
-        m_parent.get_selection().add_object((unsigned int)first_obj, true);
+        std::vector<int> obj_idxs(touched_objects.begin(), touched_objects.end());
+        m_parent.get_selection().add_object_from_idx(obj_idxs);
         if (m_parent.get_gizmos_manager().get_current_type() != GLGizmosManager::HoleFill)
             m_parent.get_gizmos_manager().open_gizmo(GLGizmosManager::HoleFill);
     }
