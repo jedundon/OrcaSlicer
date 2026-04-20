@@ -70,12 +70,16 @@ std::string GLGizmoHoleFill::on_get_name() const
 
 bool GLGizmoHoleFill::on_is_activable() const
 {
-    // HF-40: When the gizmo is active and we have a pending re-selection
-    // (i.e. we're inside reload_scene() after our own plater()->update()),
-    // keep reporting activable so the framework doesn't kill us during
-    // the transient empty-selection window. data_changed() will restore
-    // the selection momentarily.
-    if (m_state == On && !m_pending_reselect_objects.empty())
+    // HF-40: Once active, always report activable — exactly like Emboss.
+    // The framework's refresh_on_off_state() checks is_activable() and
+    // kills the gizmo if it returns false. But reload_scene() posts
+    // deferred events (EVT_GLCANVAS_OBJECT_SELECT) that trigger this
+    // check ~80ms later when the selection is transiently empty.
+    // No one-shot guard can protect against unbounded deferred events.
+    // Emboss survives by never overriding is_activable() (base returns true).
+    // We mirror that: once On, stay activable. Explicit close paths
+    // (reset_all_states, user deselect) bypass is_activable() entirely.
+    if (m_state == On)
         return true;
 
     const Selection& selection = m_parent.get_selection();
